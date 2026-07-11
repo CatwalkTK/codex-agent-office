@@ -47,10 +47,11 @@ const events = [
 function PixelPerson({ agent, selected }: { agent: Agent; selected: boolean }) {
   const busy = agent.status !== "idle" && agent.status !== "waiting";
   return (
-    <div className={`agent ${agent.status} ${selected ? "selected" : ""}`} style={{ left: `${agent.x}%`, top: `${agent.y}%` }}>
+    <div className={`agent ${agent.status} ${agent.id === 1 ? "boss" : ""} ${selected ? "selected" : ""}`} style={{ left: `${agent.x}%`, top: `${agent.y}%` }}>
+      {agent.id === 1 && <div className="boss-title">★ 上司</div>}
       <div className="thought">{agent.status === "coding" ? "⌨" : agent.status === "research" ? "⌕" : agent.status === "review" ? "✓" : "!"}</div>
       <div className="person" style={{ "--shirt": agent.accent, "--skin": agent.color } as React.CSSProperties}>
-        <i className="hair" /><i className="head" /><i className="body" /><i className="legs" />
+        <i className="cape" /><i className="hair" /><i className="head" /><i className="body" /><i className="belt" /><i className="legs" />
       </div>
       <div className="agent-label"><span className={busy ? "pulse" : ""} />{agent.name}</div>
     </div>
@@ -65,6 +66,14 @@ export function OfficeDashboard() {
   const [query, setQuery] = useState("");
   const [clock, setClock] = useState("14:32:18");
   const [toast, setToast] = useState("");
+  const [player, setPlayer] = useState({ x: 34, y: 48, facing: "up" });
+  const [dialogue, setDialogue] = useState(0);
+
+  const dialogueLines = [
+    "よく来た、Jobs1よ。いまエージェントたちは新しいUIを組み立てている。",
+    "Scoutは情報を集め、Mikaは画面を整え、Reviewerは品質を守っているぞ。",
+    "君の次の指示を聞かせてくれ。クエストとして仲間たちに届けよう！",
+  ];
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -72,6 +81,27 @@ export function OfficeDashboard() {
     }, 1000);
     return () => window.clearInterval(timer);
   }, [live]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase();
+      if (["arrowup", "arrowdown", "arrowleft", "arrowright", "w", "a", "s", "d", "enter", " "].includes(key)) event.preventDefault();
+      if (key === "enter" || key === " ") {
+        setDialogue((current) => (current + 1) % dialogueLines.length);
+        return;
+      }
+      const moves: Record<string, { dx: number; dy: number; facing: string }> = {
+        arrowup: { dx: 0, dy: -3, facing: "up" }, w: { dx: 0, dy: -3, facing: "up" },
+        arrowdown: { dx: 0, dy: 3, facing: "down" }, s: { dx: 0, dy: 3, facing: "down" },
+        arrowleft: { dx: -3, dy: 0, facing: "left" }, a: { dx: -3, dy: 0, facing: "left" },
+        arrowright: { dx: 3, dy: 0, facing: "right" }, d: { dx: 3, dy: 0, facing: "right" },
+      };
+      const move = moves[key];
+      if (move) setPlayer((current) => ({ x: Math.max(5, Math.min(94, current.x + move.dx)), y: Math.max(12, Math.min(88, current.y + move.dy)), facing: move.facing }));
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [dialogueLines.length]);
 
   const selected = agents.find((a) => a.id === selectedId) ?? agents[0];
   const visible = useMemo(() => agents.filter((a) => (filter === "all" || a.status === filter) && a.name.toLowerCase().includes(query.toLowerCase())), [agents, filter, query]);
@@ -85,6 +115,10 @@ export function OfficeDashboard() {
     const order: Status[] = ["coding", "research", "review", "waiting", "idle"];
     setAgents((current) => current.map((a) => a.id === selected.id ? { ...a, status: order[(order.indexOf(a.status) + 1) % order.length] } : a));
     notify(`${selected.name} の状態を更新しました`);
+  }
+
+  function movePlayer(dx: number, dy: number, facing: string) {
+    setPlayer((current) => ({ x: Math.max(5, Math.min(94, current.x + dx)), y: Math.max(12, Math.min(88, current.y + dy)), facing }));
   }
 
   return (
@@ -119,11 +153,12 @@ export function OfficeDashboard() {
 
       <section className="workspace">
         <div className="workspace-head">
-          <div><div className="eyebrow">LIVE WORKSPACE</div><h1>エージェント・オフィス</h1></div>
+          <div><div className="eyebrow">CODEX QUEST · LIVE WORKSPACE</div><h1>はじまりのオフィス</h1></div>
           <div className="workspace-actions"><span>{clock}</span><button onClick={() => notify("俯瞰表示に切り替えました")}>▦ 俯瞰</button><button onClick={() => notify("レイアウト編集モード")}>✦ レイアウト</button></div>
         </div>
 
         <div className="office-card">
+          <div className="game-hud"><div><span>ゆうしゃ</span><b>Jobs1</b></div><div><span>LEVEL</span><b>12</b></div><div><span>MISSION</span><b>上司Codexに話しかける</b></div></div>
           <div className="office-grid">
             <div className="room-title planning">PLANNING</div><div className="room-title build">BUILD ZONE</div><div className="room-title review-room">REVIEW</div>
             <div className="rug rug-a" /><div className="rug rug-b" />
@@ -136,8 +171,18 @@ export function OfficeDashboard() {
             <div className="whiteboard"><span>SPRINT 24</span><i /><i /><i /></div>
             <div className="server"><i /><i /><i /></div>
             {agents.map((agent) => <button className="agent-button" aria-label={`${agent.name}を選択`} key={agent.id} onClick={() => setSelectedId(agent.id)}><PixelPerson agent={agent} selected={selected.id === agent.id} /></button>)}
+            <div className={`player-character face-${player.facing}`} style={{ left: `${player.x}%`, top: `${player.y}%` }}>
+              <div className="player-name">▼ あなた</div><i className="player-hair" /><i className="player-head" /><i className="player-body" /><i className="player-sash" /><i className="player-legs" /><i className="player-sword" />
+            </div>
+            <div className="rpg-dialogue" role="dialog" aria-label="Codexとの会話" onClick={() => setDialogue((dialogue + 1) % dialogueLines.length)}>
+              <div className="speaker-face"><i /><b /><em /></div>
+              <div><strong>上司 Codex</strong><p>「{dialogueLines[dialogue]}」</p><small>Enter / Space またはクリックで次へ <span>▼</span></small></div>
+            </div>
+            <div className="game-controls" aria-label="キャラクター操作">
+              <button aria-label="上へ" onClick={() => movePlayer(0,-3,"up")}>▲</button><button aria-label="左へ" onClick={() => movePlayer(-3,0,"left")}>◀</button><button aria-label="話す" className="talk" onClick={() => setDialogue((dialogue + 1) % dialogueLines.length)}>A</button><button aria-label="右へ" onClick={() => movePlayer(3,0,"right")}>▶</button><button aria-label="下へ" onClick={() => movePlayer(0,3,"down")}>▼</button>
+            </div>
           </div>
-          <div className="office-legend"><span><i className="dot coding" />稼働中</span><span><i className="dot research" />調査中</span><span><i className="dot waiting" />確認待ち</span><small>エージェントをクリックして詳細を表示</small></div>
+          <div className="office-legend"><span><i className="dot coding" />稼働中</span><span><i className="dot research" />調査中</span><span><i className="dot waiting" />確認待ち</span><small>矢印キー / WASDで移動 · Enter / Spaceで話す</small></div>
         </div>
 
         <div className="activity-section">
