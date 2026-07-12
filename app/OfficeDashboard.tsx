@@ -23,6 +23,34 @@ const obstacles = [
   { x1: 89, x2: 97, y1: 58, y2: 82 },
 ];
 
+const sourceLines = [
+  "export function OfficeDashboard() {",
+  "  const [agents, setAgents] = useAgentRuntime();",
+  "  const stream = useCodexEventStream();",
+  "",
+  "  useEffect(() => {",
+  "    stream.on('tool.start', handleToolStart);",
+  "    stream.on('file.change', refreshWorkspace);",
+  "    return () => stream.disconnect();",
+  "  }, [stream]);",
+  "",
+  "  function assignTask(agentId: string) {",
+  "    runtime.dispatch({ type: 'ASSIGN_TASK', agentId });",
+  "    updateOfficeState(agentId, 'working');",
+  "  }",
+  "",
+  "  return <InteractiveOffice agents={agents} />;",
+  "}",
+];
+
+const runtimeEvents = [
+  ["Scout", "SEARCH", "関連コンポーネントを検索中…"],
+  ["Mika", "EDIT", "OfficeDashboard.tsx を更新"],
+  ["Reviewer", "CHECK", "型チェックを実行中…"],
+  ["Sora", "TEST", "インタラクションテスト 12/18"],
+  ["Codex", "SYNC", "エージェント状態を同期"],
+];
+
 function BusinessCharacter({ person }: { person: (typeof staff)[number] }) {
   return (
     <div className={`npc ${person.boss ? "manager" : ""}`} style={{ left: `${person.x}%`, top: `${person.y}%`, "--suit": person.suit, "--skin": person.skin, "--hair": person.hair } as React.CSSProperties}>
@@ -47,11 +75,25 @@ export function OfficeDashboard() {
   const [messages, setMessages] = useState<ChatMessage[]>([{ from: "codex", text: "お疲れさまです。次の指示をどうぞ。" }]);
   const [clock, setClock] = useState("09:42");
   const [toast, setToast] = useState("");
+  const [runtimeTick, setRuntimeTick] = useState(1);
+  const [terminal, setTerminal] = useState(["$ codex run --workspace office-ui", "✓ Agent runtime connected", "✓ Watching 24 workspace files"]);
   const inputRef = useRef<HTMLInputElement>(null);
   const nearCodex = Math.hypot(player.x - 50, player.y - 37) < 10;
 
   useEffect(() => {
     const timer = window.setInterval(() => setClock(new Date().toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit", hour12: false })), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setRuntimeTick((current) => current + 1);
+      setTerminal((current) => {
+        const event = runtimeEvents[(current.length - 3) % runtimeEvents.length];
+        const time = new Date().toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+        return [...current.slice(-7), `${time}  ${event[1].padEnd(6)}  ${event[0]} · ${event[2]}`];
+      });
+    }, 2100);
     return () => window.clearInterval(timer);
   }, []);
 
@@ -156,6 +198,29 @@ export function OfficeDashboard() {
 
         <div className="control-hint"><span><kbd>WASD</kbd> / <kbd>矢印</kbd> 移動</span><span><kbd>ENTER</kbd> 会話</span><span>家具と社員には当たり判定があります</span></div>
       </section>
+
+      <aside className="dev-monitor" aria-label="エージェント実行モニター">
+        <header><div><i className="live-dot" /><b>LIVE DEV MONITOR</b></div><span>接続中</span></header>
+        <section className="source-window">
+          <div className="window-bar"><span>SOURCE CODE</span><div><i /><i /><i /></div></div>
+          <div className="file-tabs"><button className="active"><i>TSX</i> OfficeDashboard.tsx</button><button><i>CSS</i> globals.css</button></div>
+          <div className="code-breadcrumb">app <b>›</b> OfficeDashboard.tsx</div>
+          <pre className="code-view"><code>{sourceLines.map((line, index) => {
+            const activeLine = 2 + (runtimeTick % 14);
+            return <span className={index === activeLine ? "active-line" : ""} key={index}><em>{String(index + 1).padStart(2, "0")}</em><b>{line || " "}</b>{index === activeLine && <i className="code-cursor" />}</span>;
+          })}</code></pre>
+          <div className="code-status"><span>Ln {3 + (runtimeTick % 14)}, Col 18</span><span>UTF-8</span><span>TypeScript React</span></div>
+        </section>
+
+        <section className="runtime-window">
+          <div className="window-bar"><span>RUNNING</span><div className="running-badge"><i />LIVE</div></div>
+          <div className="runtime-summary"><div><small>PROCESS</small><b>codex-agent</b></div><div><small>ELAPSED</small><b>04:{String(12 + runtimeTick).padStart(2,"0")}</b></div><div><small>CPU</small><b>{18 + runtimeTick % 9}%</b></div></div>
+          <div className="terminal-output">{terminal.map((line, index) => <div className={index === terminal.length - 1 ? "latest" : ""} key={`${line}-${index}`}><span>{line.startsWith("$") ? "❯" : line.includes("EDIT") ? "+" : line.includes("TEST") ? "◆" : "·"}</span><code>{line.replace(/^\$ /, "")}</code></div>)}</div>
+          <div className="terminal-command"><span>❯</span><code>npm run dev</code><i /></div>
+        </section>
+
+        <section className="agent-now"><div className="agent-now-head"><span>ACTIVE AGENTS</span><b>4 / 5</b></div>{staff.slice(0,4).map((person,index)=><div key={person.name}><i style={{background:person.suit}} /><span><b>{person.name}</b><small>{runtimeEvents[index][2]}</small></span><em className={index === runtimeTick % 4 ? "working" : ""}>{index === runtimeTick % 4 ? "RUN" : "LIVE"}</em></div>)}</section>
+      </aside>
 
       {chatOpen && <div className="chat-backdrop" role="presentation">
         <section className="boss-chat" role="dialog" aria-modal="true" aria-label="上司Codexとのチャット">
