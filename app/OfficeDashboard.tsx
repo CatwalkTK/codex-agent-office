@@ -1,250 +1,148 @@
 "use client";
 
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type Facing = "up" | "down" | "left" | "right";
 type Point = { x: number; y: number; facing: Facing };
-type ChatMessage = { from: "you" | "codex"; text: string };
+type RuntimeEvent = { id: string; time: string; kind: string; label: string; detail: string; status: string };
+type AgentState = { id: string; name: string; role: string; state: string; tool: string | null };
+type Snapshot = {
+  connected: boolean; workspace: string; session: string | null; taskState: string; currentTool: string | null; currentFile: string | null;
+  lastAgentMessage: string; taskPrompt: string; startedAt: string | null; completedAt: string | null; changedFiles: string[];
+  events: RuntimeEvent[]; source: { path: string; lines: string[] }; agents: AgentState[];
+};
+type ChatMessage = { from: "you" | "codex" | "system"; text: string };
 
-const staff = [
-  { name: "Codex", role: "統括マネージャー", state: "指揮中", x: 50, y: 14, suit: "#8b6840", col: 1, boss: true },
-  { name: "Scout", role: "リサーチ", state: "調査中", x: 20, y: 15, suit: "#35363d", col: 2 },
-  { name: "Mika", role: "UIエンジニア", state: "実装中", x: 80, y: 15, suit: "#454149", col: 3 },
-  { name: "Reviewer", role: "品質管理", state: "レビュー", x: 28, y: 55, suit: "#31443e", col: 4 },
-  { name: "Sora", role: "テスト担当", state: "待機中", x: 73, y: 55, suit: "#2d4c78", col: 5 },
-];
-
+const BRIDGE = "http://127.0.0.1:4312";
+const emptySnapshot: Snapshot = { connected: false, workspace: "", session: null, taskState: "disconnected", currentTool: null, currentFile: null, lastAgentMessage: "", taskPrompt: "", startedAt: null, completedAt: null, changedFiles: [], events: [], source: { path: "", lines: [] }, agents: [] };
+const agentPositions = [{ x: 50, y: 14 }, { x: 20, y: 15 }, { x: 80, y: 15 }, { x: 28, y: 55 }, { x: 73, y: 55 }];
 const obstacles = [
-  { x1: 39, x2: 61, y1: 17, y2: 32 },
-  { x1: 10, x2: 30, y1: 18, y2: 36 },
-  { x1: 70, x2: 89, y1: 18, y2: 36 },
-  { x1: 17, x2: 39, y1: 59, y2: 72 },
-  { x1: 62, x2: 84, y1: 59, y2: 72 },
-  { x1: 7, x2: 25, y1: 67, y2: 82 },
-  { x1: 89, x2: 97, y1: 58, y2: 82 },
+  { x1: 39, x2: 61, y1: 17, y2: 32 }, { x1: 10, x2: 30, y1: 18, y2: 36 }, { x1: 70, x2: 89, y1: 18, y2: 36 },
+  { x1: 17, x2: 39, y1: 59, y2: 72 }, { x1: 62, x2: 84, y1: 59, y2: 72 }, { x1: 7, x2: 25, y1: 67, y2: 82 }, { x1: 89, x2: 97, y1: 58, y2: 82 },
 ];
 
-const sourceLines = [
-  "export function OfficeDashboard() {",
-  "  const [agents, setAgents] = useAgentRuntime();",
-  "  const stream = useCodexEventStream();",
-  "",
-  "  useEffect(() => {",
-  "    stream.on('tool.start', handleToolStart);",
-  "    stream.on('file.change', refreshWorkspace);",
-  "    return () => stream.disconnect();",
-  "  }, [stream]);",
-  "",
-  "  function assignTask(agentId: string) {",
-  "    runtime.dispatch({ type: 'ASSIGN_TASK', agentId });",
-  "    updateOfficeState(agentId, 'working');",
-  "  }",
-  "",
-  "  return <InteractiveOffice agents={agents} />;",
-  "}",
-];
-
-const runtimeEvents = [
-  ["Scout", "SEARCH", "関連コンポーネントを検索中…"],
-  ["Mika", "EDIT", "OfficeDashboard.tsx を更新"],
-  ["Reviewer", "CHECK", "型チェックを実行中…"],
-  ["Sora", "TEST", "インタラクションテスト 12/18"],
-  ["Codex", "SYNC", "エージェント状態を同期"],
-];
-
-function BusinessCharacter({ person }: { person: (typeof staff)[number] }) {
-  return (
-    <div className={`npc image-npc ${person.boss ? "manager" : ""}`} style={{ left: `${person.x}%`, top: `${person.y}%` }}>
-      {person.boss && <div className="manager-badge">BOSS</div>}
-      <div className="npc-art" style={{ backgroundPosition: `${person.col * 20}% 50%` }} />
-      <div className="npc-tag"><b>{person.name}</b><span>{person.state}</span></div>
-    </div>
-  );
+function RuntimeCharacter({ agent, index }: { agent: AgentState; index: number }) {
+  const position = agentPositions[index] || { x: 50 + (index % 3) * 12, y: 45 + Math.floor(index / 3) * 20 };
+  const spriteIndex = index === 0 ? 1 : Math.min(index + 1, 5);
+  return <div className={`npc image-npc runtime-npc state-${agent.state}`} style={{ left: `${position.x}%`, top: `${position.y}%` }}>
+    {index === 0 && <div className="manager-badge">CODEX</div>}
+    <div className="npc-art" style={{ backgroundPosition: `${spriteIndex * 20}% 50%` }} />
+    <div className="npc-tag"><b>{agent.name}</b><span>{agent.tool || agent.state}</span></div>
+    {agent.state === "working" && <div className="work-spark">•••</div>}
+  </div>;
 }
 
-function codexReply(input: string) {
-  if (/進捗|状況|どう/.test(input)) return "現在はUIエンジニアが実装中、Reviewerが変更差分を確認中だ。全体進捗は68%。次の報告は完了時に届けよう。";
-  if (/任せ|お願い|作って|実装/.test(input)) return `了解した。「${input}」を新しいタスクとして整理し、最適な担当エージェントへ割り当てる。`;
-  if (/止め|中断|キャンセル/.test(input)) return "了解した。進行中の作業を安全な地点で停止し、変更内容を保持する。";
-  return `承知した。「${input}」という指示でよいな。要件を確認し、チームへ共有する。`;
+function formatTime(value: string) {
+  try { return new Date(value).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }); } catch { return "--:--:--"; }
 }
 
 export function OfficeDashboard() {
+  const [snapshot, setSnapshot] = useState<Snapshot>(emptySnapshot);
+  const [bridgeConnected, setBridgeConnected] = useState(false);
   const [player, setPlayer] = useState<Point>({ x: 50, y: 98, facing: "up" });
   const [entering, setEntering] = useState(true);
   const [doorOpen, setDoorOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [chatInput, setChatInput] = useState("");
-  const [messages, setMessages] = useState<ChatMessage[]>([{ from: "codex", text: "お疲れさまです。次の指示をどうぞ。" }]);
-  const [clock, setClock] = useState("09:42");
-  const [toast, setToast] = useState("");
-  const [runtimeTick, setRuntimeTick] = useState(1);
-  const [terminal, setTerminal] = useState(["$ codex run --workspace office-ui", "✓ Agent runtime connected", "✓ Watching 24 workspace files"]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [submitting, setSubmitting] = useState(false);
+  const [now, setNow] = useState(Date.now());
   const inputRef = useRef<HTMLInputElement>(null);
+  const lastReply = useRef("");
   const nearCodex = Math.hypot(player.x - 50, player.y - 37) < 10;
 
   useEffect(() => {
-    const timer = window.setInterval(() => setClock(new Date().toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit", hour12: false })), 1000);
-    return () => window.clearInterval(timer);
+    const stream = new EventSource(`${BRIDGE}/events`);
+    stream.onmessage = (event) => { try { setSnapshot(JSON.parse(event.data)); setBridgeConnected(true); } catch {} };
+    stream.onerror = () => setBridgeConnected(false);
+    return () => stream.close();
   }, []);
 
+  useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(timer); }, []);
   useEffect(() => {
-    const open = window.setTimeout(() => setDoorOpen(true), 450);
-    const walkIn = window.setTimeout(() => setPlayer({ x: 50, y: 84, facing: "up" }), 1050);
-    const finish = window.setTimeout(() => { setEntering(false); setDoorOpen(false); }, 3000);
-    return () => { window.clearTimeout(open); window.clearTimeout(walkIn); window.clearTimeout(finish); };
+    const open = window.setTimeout(() => setDoorOpen(true), 350);
+    const walk = window.setTimeout(() => setPlayer({ x: 50, y: 84, facing: "up" }), 850);
+    const done = window.setTimeout(() => { setEntering(false); setDoorOpen(false); }, 2700);
+    return () => { clearTimeout(open); clearTimeout(walk); clearTimeout(done); };
   }, []);
-
+  useEffect(() => { if (chatOpen) window.setTimeout(() => inputRef.current?.focus(), 80); }, [chatOpen]);
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      setRuntimeTick((current) => current + 1);
-      setTerminal((current) => {
-        const event = runtimeEvents[(current.length - 3) % runtimeEvents.length];
-        const time = new Date().toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
-        return [...current.slice(-7), `${time}  ${event[1].padEnd(6)}  ${event[0]} · ${event[2]}`];
-      });
-    }, 2100);
-    return () => window.clearInterval(timer);
-  }, []);
+    if (snapshot.lastAgentMessage && snapshot.lastAgentMessage !== lastReply.current) {
+      lastReply.current = snapshot.lastAgentMessage;
+      setMessages((current) => [...current, { from: "codex", text: snapshot.lastAgentMessage }]);
+      setSubmitting(false);
+    }
+  }, [snapshot.lastAgentMessage]);
 
-  useEffect(() => {
-    if (chatOpen) window.setTimeout(() => inputRef.current?.focus(), 80);
-  }, [chatOpen]);
+  const duration = useMemo(() => snapshot.startedAt ? Math.max(0, Math.round(((snapshot.completedAt ? new Date(snapshot.completedAt).getTime() : now) - new Date(snapshot.startedAt).getTime()) / 1000)) : 0, [snapshot.startedAt, snapshot.completedAt, now]);
+  const latestEvents = snapshot.events.slice(-12).reverse();
 
-  function flash(text: string) {
-    setToast(text);
-    window.setTimeout(() => setToast(""), 1600);
-  }
-
-  function blocked(x: number, y: number) {
-    const furniture = obstacles.some((o) => x > o.x1 && x < o.x2 && y > o.y1 && y < o.y2);
-    const coworker = staff.slice(1).some((p) => Math.hypot(x - p.x, y - p.y) < 4.2);
-    return furniture || coworker;
-  }
-
+  function blocked(x: number, y: number) { return obstacles.some((o) => x > o.x1 && x < o.x2 && y > o.y1 && y < o.y2); }
   function move(dx: number, dy: number, facing: Facing) {
     if (chatOpen || entering) return;
-    setPlayer((current) => {
-      const next = { x: Math.max(3, Math.min(97, current.x + dx)), y: Math.max(10, Math.min(92, current.y + dy)), facing };
-      if (blocked(next.x, next.y)) return { ...current, facing };
-      return next;
-    });
+    setPlayer((current) => { const next = { x: Math.max(3, Math.min(97, current.x + dx)), y: Math.max(10, Math.min(92, current.y + dy)), facing }; return blocked(next.x, next.y) ? { ...current, facing } : next; });
   }
-
-  function talk() {
-    if (nearCodex) setChatOpen(true);
-    else flash("Codexのデスクまで近づいてください");
-  }
+  function talk() { if (nearCodex) setChatOpen(true); }
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.target instanceof HTMLInputElement) return;
-      const key = event.key.toLowerCase();
-      if (chatOpen) {
-        if (key === "escape") setChatOpen(false);
-        return;
-      }
-      const map: Record<string, [number, number, Facing]> = {
-        arrowup: [0, -2.6, "up"], w: [0, -2.6, "up"], arrowdown: [0, 2.6, "down"], s: [0, 2.6, "down"],
-        arrowleft: [-2.2, 0, "left"], a: [-2.2, 0, "left"], arrowright: [2.2, 0, "right"], d: [2.2, 0, "right"],
-      };
-      if (map[key]) { event.preventDefault(); move(...map[key]); }
+      if (chatOpen) { if (event.key === "Escape") setChatOpen(false); return; }
+      const map: Record<string, [number, number, Facing]> = { arrowup:[0,-2.6,"up"],w:[0,-2.6,"up"],arrowdown:[0,2.6,"down"],s:[0,2.6,"down"],arrowleft:[-2.2,0,"left"],a:[-2.2,0,"left"],arrowright:[2.2,0,"right"],d:[2.2,0,"right"] };
+      const key = event.key.toLowerCase(); if (map[key]) { event.preventDefault(); move(...map[key]); }
       if (key === "enter" || key === " ") { event.preventDefault(); talk(); }
     };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [chatOpen, nearCodex, entering]);
+    window.addEventListener("keydown", onKeyDown); return () => window.removeEventListener("keydown", onKeyDown);
+  }, [chatOpen, entering, nearCodex]);
 
-  function submitChat(event: FormEvent) {
-    event.preventDefault();
-    const value = chatInput.trim();
-    if (!value) return;
-    setMessages((current) => [...current, { from: "you", text: value }, { from: "codex", text: codexReply(value) }]);
-    setChatInput("");
+  async function submitTask(event: FormEvent) {
+    event.preventDefault(); const prompt = chatInput.trim(); if (!prompt || submitting) return;
+    if (!bridgeConnected) { setMessages((current) => [...current, { from:"system", text:"ローカルブリッジが未接続です。npm run bridge を起動してください。" }]); return; }
+    setMessages((current) => [...current, { from:"you", text:prompt }]); setChatInput(""); setSubmitting(true);
+    try {
+      const response = await fetch(`${BRIDGE}/task`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ prompt }) });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "タスクを開始できませんでした");
+      setMessages((current) => [...current, { from:"system", text:"実際のCodexタスクを開始しました。完了まで実行イベントを表示します。" }]);
+    } catch (error) { setSubmitting(false); setMessages((current) => [...current, { from:"system", text:error instanceof Error ? error.message : "接続エラー" }]); }
   }
 
-  return (
-    <main className="office-app">
-      <header className="office-topbar">
-        <div className="office-brand"><span>C</span><div><b>CODEX & CO.</b><small>AI OPERATIONS OFFICE</small></div></div>
-        <div className="office-title"><i className="live-dot" />東京本社 · 開発フロア</div>
-        <div className="office-meta"><span>{clock}</span><button onClick={() => flash("通知は2件あります")}>通知 <b>2</b></button><div className="user-chip">J</div></div>
-      </header>
+  const statusLabel = !bridgeConnected ? "未接続" : snapshot.taskState === "working" || snapshot.taskState === "starting" ? "実行中" : snapshot.taskState === "complete" ? "完了" : snapshot.taskState;
 
-      <section className="office-stage">
-        <div className="game-status">
-          <div><small>PLAYER</small><b>Jobs1</b><span>プロジェクトオーナー</span></div>
-          <div><small>OBJECTIVE</small><b>{nearCodex ? "Codexと会話する" : "上司Codexのデスクへ向かう"}</b></div>
-          <div className="online"><i />5 AGENTS ONLINE</div>
-        </div>
+  return <main className="office-app real-runtime">
+    <header className="office-topbar">
+      <div className="office-brand"><span>C</span><div><b>CODEX & CO.</b><small>REAL RUNTIME OFFICE</small></div></div>
+      <div className="office-title"><i className={`live-dot ${bridgeConnected ? "" : "offline"}`} />{bridgeConnected ? "ローカルCodex接続中" : "ローカルブリッジ未接続"}</div>
+      <div className="office-meta"><span>{snapshot.session ? snapshot.session.slice(-18) : "NO SESSION"}</span><div className="user-chip">J</div></div>
+    </header>
 
-        <div className="office-map">
-          <div className="windows"><i /><i /><i /><i /></div>
-          <div className="zone-label executive">EXECUTIVE DESK</div><div className="zone-label product">PRODUCT TEAM</div><div className="zone-label qa">QUALITY & TEST</div>
-          <div className="executive-desk"><div className="wide-monitor"><i /></div><i className="laptop" /><i className="coffee" /><span>CODEX</span></div>
-          <div className="workstation ws-left"><div className="monitor"><i /></div><div className="chair" /></div>
-          <div className="workstation ws-right"><div className="monitor"><i /></div><div className="chair" /></div>
-          <div className="agent-desk desk-review"><div className="monitor"><i /></div><div className="desk-chair" /><span>REVIEWER</span></div>
-          <div className="agent-desk desk-test"><div className="monitor"><i /></div><div className="desk-chair" /><span>SORA</span></div>
-          <div className="office-sofa"><i /><i /><span /></div>
-          <div className="office-plant plant-left"><i /><b /></div><div className="office-plant plant-right"><i /><b /></div>
-          <div className="server-rack"><i /><i /><i /><b /></div>
-          <div className="kanban"><b>ROADMAP</b><i /><i /><i /><i /><i /></div>
-          <div className="water-cooler"><i /><b /></div>
-          <div className={`auto-door ${doorOpen ? "open" : ""}`}><div className="door-sign">AUTO · ENTRANCE</div><i className="door-left" /><i className="door-right" /><b className="door-sensor" /></div>
-          {entering && <div className="entry-caption">WELCOME TO CODEX & CO.</div>}
+    <section className="office-stage">
+      <div className="game-status"><div><small>RUNTIME</small><b>{statusLabel}</b><span>{snapshot.currentTool || "toolなし"}</span></div><div><small>REAL TASK</small><b>{snapshot.taskPrompt || "Codexへの指示を待っています"}</b></div><div className={bridgeConnected ? "online" : "online disconnected"}><i />{bridgeConnected ? `${snapshot.agents.length} AGENT CONNECTED` : "BRIDGE OFFLINE"}</div></div>
+      <div className="office-map">
+        <div className="windows"><i /><i /><i /><i /></div>
+        <div className="zone-label executive">CODEX DESK</div><div className="zone-label product">WORKSPACE</div><div className="zone-label qa">CHANGES</div>
+        <div className="executive-desk"><div className="wide-monitor"><i /></div><i className="laptop" /><i className="coffee" /><span>CODEX</span></div>
+        <div className="workstation ws-left"><div className="monitor"><i /></div><div className="chair" /></div><div className="workstation ws-right"><div className="monitor"><i /></div><div className="chair" /></div>
+        <div className="agent-desk desk-review"><div className="monitor"><i /></div><div className="desk-chair" /><span>WORKTREE</span></div><div className="agent-desk desk-test"><div className="monitor"><i /></div><div className="desk-chair" /><span>TESTS</span></div>
+        <div className="office-sofa"><i /><i /><span /></div><div className="office-plant plant-left"><i /><b /></div><div className="office-plant plant-right"><i /><b /></div><div className="server-rack"><i /><i /><i /><b /></div>
+        <div className={`auto-door ${doorOpen ? "open" : ""}`}><div className="door-sign">AUTO · ENTRANCE</div><i className="door-left" /><i className="door-right" /><b className="door-sensor" /></div>
+        {snapshot.agents.map((agent,index)=><RuntimeCharacter agent={agent} index={index} key={agent.id} />)}
+        {!bridgeConnected && <div className="offline-agent"><span>!</span><b>Codex未接続</b><small>架空の動作は表示しません</small></div>}
+        <div className={`business-player image-player face-${player.facing} ${entering ? "entering" : ""}`} style={{left:`${player.x}%`,top:`${player.y}%`}}><div className="player-arrow">YOU ▼</div><div className="player-art" /></div>
+        {nearCodex && !chatOpen && <button className="talk-prompt" onClick={talk}><kbd>ENTER</kbd><span>Codexへ実タスクを依頼</span></button>}
+        <div className="movement-pad"><button onClick={()=>move(0,-2.6,"up")}>▲</button><button onClick={()=>move(-2.2,0,"left")}>◀</button><button className={nearCodex?"can-talk":""} onClick={talk}>A</button><button onClick={()=>move(2.2,0,"right")}>▶</button><button onClick={()=>move(0,2.6,"down")}>▼</button></div>
+        <div className="real-event-strip"><b>{snapshot.taskState === "working" ? "● LIVE" : "STATUS"}</b><span>{latestEvents[0]?.label || (bridgeConnected ? "イベント待機中" : "ブリッジを起動してください")}</span><em>{latestEvents[0]?.detail || ""}</em></div>
+      </div>
+      <div className="control-hint"><span><kbd>WASD</kbd> / <kbd>矢印</kbd> 移動</span><span><kbd>ENTER</kbd> Codexへ指示</span><span>表示データ: Codex JSONL + Git + 実ファイル</span></div>
+    </section>
 
-          {staff.map((person) => <BusinessCharacter key={person.name} person={person} />)}
+    <aside className="dev-monitor">
+      <header><div><i className={`live-dot ${bridgeConnected?"":"offline"}`} /><b>REAL DEV MONITOR</b></div><span>{bridgeConnected?"CONNECTED":"OFFLINE"}</span></header>
+      <section className="source-window"><div className="window-bar"><span>ACTUAL SOURCE</span><div><i /><i /><i /></div></div><div className="file-tabs"><button className="active"><i>FILE</i>{snapshot.source.path || "接続待ち"}</button></div><div className="code-breadcrumb">{snapshot.currentFile || snapshot.source.path || "No source"}</div><pre className="code-view"><code>{snapshot.source.lines.length ? snapshot.source.lines.map((line,index)=><span key={index}><em>{String(index+1).padStart(2,"0")}</em><b>{line||" "}</b></span>) : <span><em>--</em><b>実ファイルはまだ取得されていません</b></span>}</code></pre><div className="code-status"><span>{snapshot.changedFiles.length} changed files</span><span>READ ONLY</span></div></section>
+      <section className="runtime-window"><div className="window-bar"><span>CODEX EVENTS</span><div className={`running-badge ${bridgeConnected?"":"offline"}`}><i />{statusLabel}</div></div><div className="runtime-summary"><div><small>STATE</small><b>{snapshot.taskState}</b></div><div><small>ELAPSED</small><b>{Math.floor(duration/60)}:{String(duration%60).padStart(2,"0")}</b></div><div><small>FILES</small><b>{snapshot.changedFiles.length}</b></div></div><div className="terminal-output real-events">{latestEvents.length ? latestEvents.map((item)=><div className={item.status} key={item.id}><span>{item.status==="success"?"✓":item.status==="error"?"!":"·"}</span><code>{formatTime(item.time)}  {item.label}{item.detail?` · ${item.detail}`:""}</code></div>) : <div><span>·</span><code>{bridgeConnected?"実イベントを待機しています":"ローカルブリッジに接続できません"}</code></div>}</div><div className="terminal-command"><span>❯</span><code>{snapshot.currentTool || (bridgeConnected?"idle":"npm run bridge")}</code>{snapshot.taskState==="working"&&<i />}</div></section>
+      <section className="agent-now"><div className="agent-now-head"><span>ACTUAL AGENTS</span><b>{snapshot.agents.length}</b></div>{snapshot.agents.map((agent)=><div key={agent.id}><i className={`agent-state-dot ${agent.state}`} /><span><b>{agent.name}</b><small>{agent.tool||agent.role}</small></span><em className={agent.state==="working"?"working":""}>{agent.state}</em></div>)}{!bridgeConnected&&<p className="bridge-help">固定データやタイマー演出はありません。<code>npm run bridge</code>で実データへ接続します。</p>}</section>
+    </aside>
 
-          <div className={`business-player image-player face-${player.facing} ${entering ? "entering" : ""}`} style={{ left: `${player.x}%`, top: `${player.y}%` }}>
-            <div className="player-arrow">YOU ▼</div><div className="player-art" />
-          </div>
-
-          {nearCodex && !chatOpen && <button className="talk-prompt" onClick={talk}><kbd>ENTER</kbd><span>上司Codexに話しかける</span></button>}
-
-          <div className="movement-pad">
-            <button onClick={() => move(0,-2.6,"up")}>▲</button><button onClick={() => move(-2.2,0,"left")}>◀</button><button className={nearCodex ? "can-talk" : ""} onClick={talk}>A</button><button onClick={() => move(2.2,0,"right")}>▶</button><button onClick={() => move(0,2.6,"down")}>▼</button>
-          </div>
-
-          <div className="agent-strip">{staff.map((person) => <div key={person.name}><i style={{ background: person.suit }} /><span><b>{person.name}</b><small>{person.role}</small></span><em>{person.state}</em></div>)}</div>
-        </div>
-
-        <div className="control-hint"><span><kbd>WASD</kbd> / <kbd>矢印</kbd> 移動</span><span><kbd>ENTER</kbd> 会話</span><span>家具と社員には当たり判定があります</span></div>
-      </section>
-
-      <aside className="dev-monitor" aria-label="エージェント実行モニター">
-        <header><div><i className="live-dot" /><b>LIVE DEV MONITOR</b></div><span>接続中</span></header>
-        <section className="source-window">
-          <div className="window-bar"><span>SOURCE CODE</span><div><i /><i /><i /></div></div>
-          <div className="file-tabs"><button className="active"><i>TSX</i> OfficeDashboard.tsx</button><button><i>CSS</i> globals.css</button></div>
-          <div className="code-breadcrumb">app <b>›</b> OfficeDashboard.tsx</div>
-          <pre className="code-view"><code>{sourceLines.map((line, index) => {
-            const activeLine = 2 + (runtimeTick % 14);
-            return <span className={index === activeLine ? "active-line" : ""} key={index}><em>{String(index + 1).padStart(2, "0")}</em><b>{line || " "}</b>{index === activeLine && <i className="code-cursor" />}</span>;
-          })}</code></pre>
-          <div className="code-status"><span>Ln {3 + (runtimeTick % 14)}, Col 18</span><span>UTF-8</span><span>TypeScript React</span></div>
-        </section>
-
-        <section className="runtime-window">
-          <div className="window-bar"><span>RUNNING</span><div className="running-badge"><i />LIVE</div></div>
-          <div className="runtime-summary"><div><small>PROCESS</small><b>codex-agent</b></div><div><small>ELAPSED</small><b>04:{String(12 + runtimeTick).padStart(2,"0")}</b></div><div><small>CPU</small><b>{18 + runtimeTick % 9}%</b></div></div>
-          <div className="terminal-output">{terminal.map((line, index) => <div className={index === terminal.length - 1 ? "latest" : ""} key={`${line}-${index}`}><span>{line.startsWith("$") ? "❯" : line.includes("EDIT") ? "+" : line.includes("TEST") ? "◆" : "·"}</span><code>{line.replace(/^\$ /, "")}</code></div>)}</div>
-          <div className="terminal-command"><span>❯</span><code>npm run dev</code><i /></div>
-        </section>
-
-        <section className="agent-now"><div className="agent-now-head"><span>ACTIVE AGENTS</span><b>4 / 5</b></div>{staff.slice(0,4).map((person,index)=><div key={person.name}><i style={{background:person.suit}} /><span><b>{person.name}</b><small>{runtimeEvents[index][2]}</small></span><em className={index === runtimeTick % 4 ? "working" : ""}>{index === runtimeTick % 4 ? "RUN" : "LIVE"}</em></div>)}</section>
-      </aside>
-
-      {chatOpen && <div className="chat-backdrop" role="presentation">
-        <section className="boss-chat" role="dialog" aria-modal="true" aria-label="上司Codexとのチャット">
-          <header><div className="chat-portrait image-portrait" /><div><small>MANAGER CHANNEL</small><h2>上司 Codex</h2><span><i />オンライン · 指揮中</span></div><button onClick={() => setChatOpen(false)} aria-label="チャットを閉じる">×</button></header>
-          <div className="chat-log">{messages.map((message, index) => <div className={`chat-message ${message.from}`} key={`${message.from}-${index}`}><b>{message.from === "codex" ? "Codex" : "あなた"}</b><p>{message.text}</p></div>)}</div>
-          <form onSubmit={submitChat}><input ref={inputRef} value={chatInput} onChange={(event) => setChatInput(event.target.value)} placeholder="Codexへの指示を入力…" aria-label="Codexへのメッセージ" /><button type="submit">送る ↗</button></form>
-          <footer><span>ESCで閉じる</span><span>会話内容はタスク指示として扱われます</span></footer>
-        </section>
-      </div>}
-
-      {toast && <div className="office-toast">！ {toast}</div>}
-    </main>
-  );
+    {chatOpen&&<div className="chat-backdrop"><section className="boss-chat" role="dialog" aria-modal="true"><header><div className="chat-portrait image-portrait"/><div><small>REAL CODEX TASK</small><h2>Codexへ指示</h2><span><i className={bridgeConnected?"":"offline"}/>{bridgeConnected?"ローカルCLI接続済み":"ブリッジ未接続"}</span></div><button onClick={()=>setChatOpen(false)}>×</button></header><div className="chat-log">{messages.length?messages.map((message,index)=><div className={`chat-message ${message.from}`} key={index}><b>{message.from==="you"?"あなた":message.from==="codex"?"Codex":"System"}</b><p>{message.text}</p></div>):<div className="chat-empty">ここから送信した指示は、実際のCodex CLIタスクとして実行されます。</div>}{submitting&&<div className="chat-message codex pending"><b>Codex</b><p>実行中…右側に実イベントを表示しています。</p></div>}</div><form onSubmit={submitTask}><input ref={inputRef} value={chatInput} onChange={(event)=>setChatInput(event.target.value)} placeholder="実行するタスクを入力…" disabled={submitting}/><button type="submit" disabled={submitting||!chatInput.trim()}>実行 ↗</button></form><footer><span>ESCで閉じる</span><span>workspace-write sandboxで実行</span></footer></section></div>}
+  </main>;
 }
