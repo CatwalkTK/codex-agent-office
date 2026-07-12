@@ -7,11 +7,11 @@ type Point = { x: number; y: number; facing: Facing };
 type ChatMessage = { from: "you" | "codex"; text: string };
 
 const staff = [
-  { name: "Codex", role: "統括マネージャー", state: "指揮中", x: 50, y: 14, suit: "#8b6840", col: 2, row: 0, boss: true },
-  { name: "Scout", role: "リサーチ", state: "調査中", x: 20, y: 15, suit: "#35363d", col: 1, row: 0 },
-  { name: "Mika", role: "UIエンジニア", state: "実装中", x: 80, y: 15, suit: "#454149", col: 1, row: 1 },
-  { name: "Reviewer", role: "品質管理", state: "レビュー", x: 28, y: 55, suit: "#31443e", col: 2, row: 2 },
-  { name: "Sora", role: "テスト担当", state: "待機中", x: 73, y: 55, suit: "#2d4c78", col: 3, row: 1 },
+  { name: "Codex", role: "統括マネージャー", state: "指揮中", x: 50, y: 14, suit: "#8b6840", col: 1, boss: true },
+  { name: "Scout", role: "リサーチ", state: "調査中", x: 20, y: 15, suit: "#35363d", col: 2 },
+  { name: "Mika", role: "UIエンジニア", state: "実装中", x: 80, y: 15, suit: "#454149", col: 3 },
+  { name: "Reviewer", role: "品質管理", state: "レビュー", x: 28, y: 55, suit: "#31443e", col: 4 },
+  { name: "Sora", role: "テスト担当", state: "待機中", x: 73, y: 55, suit: "#2d4c78", col: 5 },
 ];
 
 const obstacles = [
@@ -56,7 +56,7 @@ function BusinessCharacter({ person }: { person: (typeof staff)[number] }) {
   return (
     <div className={`npc image-npc ${person.boss ? "manager" : ""}`} style={{ left: `${person.x}%`, top: `${person.y}%` }}>
       {person.boss && <div className="manager-badge">BOSS</div>}
-      <div className="npc-art" style={{ backgroundPosition: `${person.col * 33.333}% ${person.row * 50}%` }} />
+      <div className="npc-art" style={{ backgroundPosition: `${person.col * 20}% 50%` }} />
       <div className="npc-tag"><b>{person.name}</b><span>{person.state}</span></div>
     </div>
   );
@@ -153,7 +153,7 @@ export function OfficeDashboard() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [chatOpen, nearCodex]);
+  }, [chatOpen, nearCodex, entering]);
 
   function submitChat(event: FormEvent) {
     event.preventDefault();
