@@ -7,18 +7,19 @@ type Point = { x: number; y: number; facing: Facing };
 type ChatMessage = { from: "you" | "codex"; text: string };
 
 const staff = [
-  { name: "Codex", role: "統括マネージャー", state: "指揮中", x: 50, y: 19, suit: "#313d69", skin: "#e7ae78", hair: "#28232a", boss: true },
-  { name: "Scout", role: "リサーチ", state: "調査中", x: 21, y: 42, suit: "#315c70", skin: "#bd7d55", hair: "#1f1d20" },
-  { name: "Mika", role: "UIエンジニア", state: "実装中", x: 78, y: 42, suit: "#6d3f55", skin: "#efb17d", hair: "#3b2625" },
-  { name: "Reviewer", role: "品質管理", state: "レビュー", x: 32, y: 73, suit: "#4a536c", skin: "#d99b70", hair: "#5b4637" },
-  { name: "Sora", role: "テスト担当", state: "待機中", x: 75, y: 75, suit: "#3f6258", skin: "#e8b786", hair: "#252327" },
+  { name: "Codex", role: "統括マネージャー", state: "指揮中", x: 50, y: 14, suit: "#8b6840", col: 2, row: 0, boss: true },
+  { name: "Scout", role: "リサーチ", state: "調査中", x: 20, y: 15, suit: "#35363d", col: 1, row: 0 },
+  { name: "Mika", role: "UIエンジニア", state: "実装中", x: 80, y: 15, suit: "#454149", col: 1, row: 1 },
+  { name: "Reviewer", role: "品質管理", state: "レビュー", x: 28, y: 55, suit: "#31443e", col: 2, row: 2 },
+  { name: "Sora", role: "テスト担当", state: "待機中", x: 73, y: 55, suit: "#2d4c78", col: 3, row: 1 },
 ];
 
 const obstacles = [
   { x1: 39, x2: 61, y1: 17, y2: 32 },
   { x1: 10, x2: 30, y1: 18, y2: 36 },
   { x1: 70, x2: 89, y1: 18, y2: 36 },
-  { x1: 37, x2: 63, y1: 48, y2: 64 },
+  { x1: 17, x2: 39, y1: 59, y2: 72 },
+  { x1: 62, x2: 84, y1: 59, y2: 72 },
   { x1: 7, x2: 25, y1: 67, y2: 82 },
   { x1: 89, x2: 97, y1: 58, y2: 82 },
 ];
@@ -53,9 +54,9 @@ const runtimeEvents = [
 
 function BusinessCharacter({ person }: { person: (typeof staff)[number] }) {
   return (
-    <div className={`npc ${person.boss ? "manager" : ""}`} style={{ left: `${person.x}%`, top: `${person.y}%`, "--suit": person.suit, "--skin": person.skin, "--hair": person.hair } as React.CSSProperties}>
+    <div className={`npc image-npc ${person.boss ? "manager" : ""}`} style={{ left: `${person.x}%`, top: `${person.y}%` }}>
       {person.boss && <div className="manager-badge">BOSS</div>}
-      <div className="npc-sprite"><i className="npc-shadow" /><i className="npc-hair" /><i className="npc-head" /><i className="npc-ear" /><i className="npc-body" /><i className="npc-shirt" /><i className="npc-tie" /><i className="npc-arm left" /><i className="npc-arm right" /><i className="npc-legs" /></div>
+      <div className="npc-art" style={{ backgroundPosition: `${person.col * 33.333}% ${person.row * 50}%` }} />
       <div className="npc-tag"><b>{person.name}</b><span>{person.state}</span></div>
     </div>
   );
@@ -69,7 +70,9 @@ function codexReply(input: string) {
 }
 
 export function OfficeDashboard() {
-  const [player, setPlayer] = useState<Point>({ x: 51, y: 88, facing: "up" });
+  const [player, setPlayer] = useState<Point>({ x: 50, y: 98, facing: "up" });
+  const [entering, setEntering] = useState(true);
+  const [doorOpen, setDoorOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [chatInput, setChatInput] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([{ from: "codex", text: "お疲れさまです。次の指示をどうぞ。" }]);
@@ -83,6 +86,13 @@ export function OfficeDashboard() {
   useEffect(() => {
     const timer = window.setInterval(() => setClock(new Date().toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit", hour12: false })), 1000);
     return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const open = window.setTimeout(() => setDoorOpen(true), 450);
+    const walkIn = window.setTimeout(() => setPlayer({ x: 50, y: 84, facing: "up" }), 1050);
+    const finish = window.setTimeout(() => { setEntering(false); setDoorOpen(false); }, 3000);
+    return () => { window.clearTimeout(open); window.clearTimeout(walkIn); window.clearTimeout(finish); };
   }, []);
 
   useEffect(() => {
@@ -113,7 +123,7 @@ export function OfficeDashboard() {
   }
 
   function move(dx: number, dy: number, facing: Facing) {
-    if (chatOpen) return;
+    if (chatOpen || entering) return;
     setPlayer((current) => {
       const next = { x: Math.max(3, Math.min(97, current.x + dx)), y: Math.max(10, Math.min(92, current.y + dy)), facing };
       if (blocked(next.x, next.y)) return { ...current, facing };
@@ -174,17 +184,20 @@ export function OfficeDashboard() {
           <div className="executive-desk"><div className="wide-monitor"><i /></div><i className="laptop" /><i className="coffee" /><span>CODEX</span></div>
           <div className="workstation ws-left"><div className="monitor"><i /></div><div className="chair" /></div>
           <div className="workstation ws-right"><div className="monitor"><i /></div><div className="chair" /></div>
-          <div className="meeting-table"><i /><i /><i /><i /><span>SPRINT<br/>REVIEW</span></div>
+          <div className="agent-desk desk-review"><div className="monitor"><i /></div><div className="desk-chair" /><span>REVIEWER</span></div>
+          <div className="agent-desk desk-test"><div className="monitor"><i /></div><div className="desk-chair" /><span>SORA</span></div>
           <div className="office-sofa"><i /><i /><span /></div>
           <div className="office-plant plant-left"><i /><b /></div><div className="office-plant plant-right"><i /><b /></div>
           <div className="server-rack"><i /><i /><i /><b /></div>
           <div className="kanban"><b>ROADMAP</b><i /><i /><i /><i /><i /></div>
           <div className="water-cooler"><i /><b /></div>
+          <div className={`auto-door ${doorOpen ? "open" : ""}`}><div className="door-sign">AUTO · ENTRANCE</div><i className="door-left" /><i className="door-right" /><b className="door-sensor" /></div>
+          {entering && <div className="entry-caption">WELCOME TO CODEX & CO.</div>}
 
           {staff.map((person) => <BusinessCharacter key={person.name} person={person} />)}
 
-          <div className={`business-player face-${player.facing}`} style={{ left: `${player.x}%`, top: `${player.y}%` }}>
-            <div className="player-arrow">YOU ▼</div><div className="player-sprite"><i className="p-shadow" /><i className="p-hair" /><i className="p-head" /><i className="p-body" /><i className="p-shirt" /><i className="p-tie" /><i className="p-case" /><i className="p-arm" /><i className="p-legs" /></div>
+          <div className={`business-player image-player face-${player.facing} ${entering ? "entering" : ""}`} style={{ left: `${player.x}%`, top: `${player.y}%` }}>
+            <div className="player-arrow">YOU ▼</div><div className="player-art" />
           </div>
 
           {nearCodex && !chatOpen && <button className="talk-prompt" onClick={talk}><kbd>ENTER</kbd><span>上司Codexに話しかける</span></button>}
@@ -224,7 +237,7 @@ export function OfficeDashboard() {
 
       {chatOpen && <div className="chat-backdrop" role="presentation">
         <section className="boss-chat" role="dialog" aria-modal="true" aria-label="上司Codexとのチャット">
-          <header><div className="chat-portrait"><i /><b /><em /></div><div><small>MANAGER CHANNEL</small><h2>上司 Codex</h2><span><i />オンライン · 指揮中</span></div><button onClick={() => setChatOpen(false)} aria-label="チャットを閉じる">×</button></header>
+          <header><div className="chat-portrait image-portrait" /><div><small>MANAGER CHANNEL</small><h2>上司 Codex</h2><span><i />オンライン · 指揮中</span></div><button onClick={() => setChatOpen(false)} aria-label="チャットを閉じる">×</button></header>
           <div className="chat-log">{messages.map((message, index) => <div className={`chat-message ${message.from}`} key={`${message.from}-${index}`}><b>{message.from === "codex" ? "Codex" : "あなた"}</b><p>{message.text}</p></div>)}</div>
           <form onSubmit={submitChat}><input ref={inputRef} value={chatInput} onChange={(event) => setChatInput(event.target.value)} placeholder="Codexへの指示を入力…" aria-label="Codexへのメッセージ" /><button type="submit">送る ↗</button></form>
           <footer><span>ESCで閉じる</span><span>会話内容はタスク指示として扱われます</span></footer>
