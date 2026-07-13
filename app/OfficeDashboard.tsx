@@ -16,6 +16,10 @@ type ChatMessage = { from: "you" | "codex" | "system"; text: string };
 const BRIDGE = "http://127.0.0.1:4312";
 const emptySnapshot: Snapshot = { connected: false, workspace: "", session: null, taskState: "disconnected", currentTool: null, currentFile: null, lastAgentMessage: "", taskPrompt: "", startedAt: null, completedAt: null, changedFiles: [], events: [], source: { path: "", lines: [] }, agents: [] };
 const agentPositions = [{ x: 50, y: 14 }, { x: 20, y: 15 }, { x: 80, y: 15 }, { x: 28, y: 55 }, { x: 73, y: 55 }];
+const officeRoster = [
+  { id:"codex", name:"Codex", role:"上司・統括" }, { id:"scout", name:"Scout", role:"検索・調査ロール" },
+  { id:"mika", name:"Mika", role:"編集・実装ロール" }, { id:"reviewer", name:"Reviewer", role:"レビュー担当ロール" }, { id:"sora", name:"Sora", role:"テスト担当ロール" },
+];
 const obstacles = [
   { x1: 39, x2: 61, y1: 17, y2: 32 }, { x1: 10, x2: 30, y1: 18, y2: 36 }, { x1: 70, x2: 89, y1: 18, y2: 36 },
   { x1: 17, x2: 39, y1: 59, y2: 72 }, { x1: 62, x2: 84, y1: 59, y2: 72 }, { x1: 7, x2: 25, y1: 67, y2: 82 }, { x1: 89, x2: 97, y1: 58, y2: 82 },
@@ -48,6 +52,7 @@ export function OfficeDashboard() {
   const [submitting, setSubmitting] = useState(false);
   const [now, setNow] = useState(Date.now());
   const inputRef = useRef<HTMLInputElement>(null);
+  const mapRef = useRef<HTMLDivElement>(null);
   const lastReply = useRef("");
   const nearCodex = Math.hypot(player.x - 50, player.y - 37) < 10;
 
@@ -62,7 +67,7 @@ export function OfficeDashboard() {
   useEffect(() => {
     const open = window.setTimeout(() => setDoorOpen(true), 350);
     const walk = window.setTimeout(() => setPlayer({ x: 50, y: 84, facing: "up" }), 850);
-    const done = window.setTimeout(() => { setEntering(false); setDoorOpen(false); }, 2700);
+    const done = window.setTimeout(() => { setEntering(false); setDoorOpen(false); mapRef.current?.focus(); }, 2000);
     return () => { clearTimeout(open); clearTimeout(walk); clearTimeout(done); };
   }, []);
   useEffect(() => { if (chatOpen) window.setTimeout(() => inputRef.current?.focus(), 80); }, [chatOpen]);
@@ -76,10 +81,23 @@ export function OfficeDashboard() {
 
   const duration = useMemo(() => snapshot.startedAt ? Math.max(0, Math.round(((snapshot.completedAt ? new Date(snapshot.completedAt).getTime() : now) - new Date(snapshot.startedAt).getTime()) / 1000)) : 0, [snapshot.startedAt, snapshot.completedAt, now]);
   const latestEvents = snapshot.events.slice(-12).reverse();
+  const displayAgents = useMemo(() => {
+    const text = `${snapshot.currentTool || ""} ${latestEvents[0]?.kind || ""} ${latestEvents[0]?.label || ""} ${latestEvents[0]?.detail || ""}`.toLowerCase();
+    return officeRoster.map((profile,index) => {
+      if (index === 0) return { ...profile, state: snapshot.agents[0]?.state || (bridgeConnected ? "idle" : "offline"), tool: snapshot.currentTool };
+      const active = snapshot.taskState === "working" && (
+        (profile.id === "scout" && /web|search|検索|調査/.test(text)) ||
+        (profile.id === "mika" && /patch|file|edit|command|変更|更新/.test(text)) ||
+        (profile.id === "reviewer" && /review|diff|check|lint|レビュー|確認/.test(text)) ||
+        (profile.id === "sora" && /test|build|vitest|playwright|テスト|ビルド/.test(text))
+      );
+      return { ...profile, state: !bridgeConnected ? "offline" : active ? "working" : "idle", tool: active ? (snapshot.currentTool || latestEvents[0]?.label || null) : null };
+    });
+  }, [snapshot.agents, snapshot.currentTool, snapshot.taskState, latestEvents, bridgeConnected]);
 
   function blocked(x: number, y: number) { return obstacles.some((o) => x > o.x1 && x < o.x2 && y > o.y1 && y < o.y2); }
   function move(dx: number, dy: number, facing: Facing) {
-    if (chatOpen || entering) return;
+    if (chatOpen) return;
     setPlayer((current) => { const next = { x: Math.max(3, Math.min(97, current.x + dx)), y: Math.max(10, Math.min(92, current.y + dy)), facing }; return blocked(next.x, next.y) ? { ...current, facing } : next; });
   }
   function talk() { if (nearCodex) setChatOpen(true); }
@@ -117,17 +135,16 @@ export function OfficeDashboard() {
     </header>
 
     <section className="office-stage">
-      <div className="game-status"><div><small>RUNTIME</small><b>{statusLabel}</b><span>{snapshot.currentTool || "toolなし"}</span></div><div><small>REAL TASK</small><b>{snapshot.taskPrompt || "Codexへの指示を待っています"}</b></div><div className={bridgeConnected ? "online" : "online disconnected"}><i />{bridgeConnected ? `${snapshot.agents.length} AGENT CONNECTED` : "BRIDGE OFFLINE"}</div></div>
-      <div className="office-map">
+      <div className="game-status"><div><small>RUNTIME</small><b>{statusLabel}</b><span>{snapshot.currentTool || "toolなし"}</span></div><div><small>REAL TASK</small><b>{snapshot.taskPrompt || "Codexへの指示を待っています"}</b></div><div className={bridgeConnected ? "online" : "online disconnected"}><i />{bridgeConnected ? `5 OFFICE ROLES · ${snapshot.agents.length} REAL AGENT` : "BRIDGE OFFLINE"}</div></div>
+      <div className="office-map" ref={mapRef} tabIndex={0} aria-label="オフィス。WASDまたは矢印キーで移動" onPointerDown={() => mapRef.current?.focus()}>
         <div className="windows"><i /><i /><i /><i /></div>
         <div className="zone-label executive">CODEX DESK</div><div className="zone-label product">WORKSPACE</div><div className="zone-label qa">CHANGES</div>
         <div className="executive-desk"><div className="wide-monitor"><i /></div><i className="laptop" /><i className="coffee" /><span>CODEX</span></div>
-        <div className="workstation ws-left"><div className="monitor"><i /></div><div className="chair" /></div><div className="workstation ws-right"><div className="monitor"><i /></div><div className="chair" /></div>
-        <div className="agent-desk desk-review"><div className="monitor"><i /></div><div className="desk-chair" /><span>WORKTREE</span></div><div className="agent-desk desk-test"><div className="monitor"><i /></div><div className="desk-chair" /><span>TESTS</span></div>
+        <div className="workstation ws-left"><div className="monitor"><i /></div><div className="chair" /><span className="desk-name">SCOUT</span></div><div className="workstation ws-right"><div className="monitor"><i /></div><div className="chair" /><span className="desk-name">MIKA</span></div>
+        <div className="agent-desk desk-review"><div className="monitor"><i /></div><div className="desk-chair" /><span>REVIEWER</span></div><div className="agent-desk desk-test"><div className="monitor"><i /></div><div className="desk-chair" /><span>SORA</span></div>
         <div className="office-sofa"><i /><i /><span /></div><div className="office-plant plant-left"><i /><b /></div><div className="office-plant plant-right"><i /><b /></div><div className="server-rack"><i /><i /><i /><b /></div>
         <div className={`auto-door ${doorOpen ? "open" : ""}`}><div className="door-sign">AUTO · ENTRANCE</div><i className="door-left" /><i className="door-right" /><b className="door-sensor" /></div>
-        {snapshot.agents.map((agent,index)=><RuntimeCharacter agent={agent} index={index} key={agent.id} />)}
-        {!bridgeConnected && <div className="offline-agent"><span>!</span><b>Codex未接続</b><small>架空の動作は表示しません</small></div>}
+        {displayAgents.map((agent,index)=><RuntimeCharacter agent={agent} index={index} key={agent.id} />)}
         <div className={`business-player image-player face-${player.facing} ${entering ? "entering" : ""}`} style={{left:`${player.x}%`,top:`${player.y}%`}}><div className="player-arrow">YOU ▼</div><div className="player-art" /></div>
         {nearCodex && !chatOpen && <button className="talk-prompt" onClick={talk}><kbd>ENTER</kbd><span>Codexへ実タスクを依頼</span></button>}
         <div className="movement-pad"><button onClick={()=>move(0,-2.6,"up")}>▲</button><button onClick={()=>move(-2.2,0,"left")}>◀</button><button className={nearCodex?"can-talk":""} onClick={talk}>A</button><button onClick={()=>move(2.2,0,"right")}>▶</button><button onClick={()=>move(0,2.6,"down")}>▼</button></div>
@@ -140,7 +157,7 @@ export function OfficeDashboard() {
       <header><div><i className={`live-dot ${bridgeConnected?"":"offline"}`} /><b>REAL DEV MONITOR</b></div><span>{bridgeConnected?"CONNECTED":"OFFLINE"}</span></header>
       <section className="source-window"><div className="window-bar"><span>ACTUAL SOURCE</span><div><i /><i /><i /></div></div><div className="file-tabs"><button className="active"><i>FILE</i>{snapshot.source.path || "接続待ち"}</button></div><div className="code-breadcrumb">{snapshot.currentFile || snapshot.source.path || "No source"}</div><pre className="code-view"><code>{snapshot.source.lines.length ? snapshot.source.lines.map((line,index)=><span key={index}><em>{String(index+1).padStart(2,"0")}</em><b>{line||" "}</b></span>) : <span><em>--</em><b>実ファイルはまだ取得されていません</b></span>}</code></pre><div className="code-status"><span>{snapshot.changedFiles.length} changed files</span><span>READ ONLY</span></div></section>
       <section className="runtime-window"><div className="window-bar"><span>CODEX EVENTS</span><div className={`running-badge ${bridgeConnected?"":"offline"}`}><i />{statusLabel}</div></div><div className="runtime-summary"><div><small>STATE</small><b>{snapshot.taskState}</b></div><div><small>ELAPSED</small><b>{Math.floor(duration/60)}:{String(duration%60).padStart(2,"0")}</b></div><div><small>FILES</small><b>{snapshot.changedFiles.length}</b></div></div><div className="terminal-output real-events">{latestEvents.length ? latestEvents.map((item)=><div className={item.status} key={item.id}><span>{item.status==="success"?"✓":item.status==="error"?"!":"·"}</span><code>{formatTime(item.time)}  {item.label}{item.detail?` · ${item.detail}`:""}</code></div>) : <div><span>·</span><code>{bridgeConnected?"実イベントを待機しています":"ローカルブリッジに接続できません"}</code></div>}</div><div className="terminal-command"><span>❯</span><code>{snapshot.currentTool || (bridgeConnected?"idle":"npm run bridge")}</code>{snapshot.taskState==="working"&&<i />}</div></section>
-      <section className="agent-now"><div className="agent-now-head"><span>ACTUAL AGENTS</span><b>{snapshot.agents.length}</b></div>{snapshot.agents.map((agent)=><div key={agent.id}><i className={`agent-state-dot ${agent.state}`} /><span><b>{agent.name}</b><small>{agent.tool||agent.role}</small></span><em className={agent.state==="working"?"working":""}>{agent.state}</em></div>)}{!bridgeConnected&&<p className="bridge-help">固定データやタイマー演出はありません。<code>npm run bridge</code>で実データへ接続します。</p>}</section>
+      <section className="agent-now"><div className="agent-now-head"><span>OFFICE ROLES · REAL EVENT MAPPING</span><b>{displayAgents.filter(agent=>agent.state==="working").length} active</b></div>{displayAgents.map((agent)=><div key={agent.id}><i className={`agent-state-dot ${agent.state}`} /><span><b>{agent.name}</b><small>{agent.tool||agent.role}</small></span><em className={agent.state==="working"?"working":""}>{agent.state}</em></div>)}</section>
     </aside>
 
     {chatOpen&&<div className="chat-backdrop"><section className="boss-chat" role="dialog" aria-modal="true"><header><div className="chat-portrait image-portrait"/><div><small>REAL CODEX TASK</small><h2>Codexへ指示</h2><span><i className={bridgeConnected?"":"offline"}/>{bridgeConnected?"ローカルCLI接続済み":"ブリッジ未接続"}</span></div><button onClick={()=>setChatOpen(false)}>×</button></header><div className="chat-log">{messages.length?messages.map((message,index)=><div className={`chat-message ${message.from}`} key={index}><b>{message.from==="you"?"あなた":message.from==="codex"?"Codex":"System"}</b><p>{message.text}</p></div>):<div className="chat-empty">ここから送信した指示は、実際のCodex CLIタスクとして実行されます。</div>}{submitting&&<div className="chat-message codex pending"><b>Codex</b><p>実行中…右側に実イベントを表示しています。</p></div>}</div><form onSubmit={submitTask}><input ref={inputRef} value={chatInput} onChange={(event)=>setChatInput(event.target.value)} placeholder="実行するタスクを入力…" disabled={submitting}/><button type="submit" disabled={submitting||!chatInput.trim()}>実行 ↗</button></form><footer><span>ESCで閉じる</span><span>workspace-write sandboxで実行</span></footer></section></div>}
