@@ -43,7 +43,7 @@ function formatTime(value: string) {
 export function OfficeDashboard() {
   const [snapshot, setSnapshot] = useState<Snapshot>(emptySnapshot);
   const [bridgeConnected, setBridgeConnected] = useState(false);
-  const [player, setPlayer] = useState<Point>({ x: 50, y: 98, facing: "up" });
+  const [player, setPlayer] = useState<Point>({ x: 50, y: 90, facing: "up" });
   const [entering, setEntering] = useState(true);
   const [doorOpen, setDoorOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
@@ -66,7 +66,7 @@ export function OfficeDashboard() {
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(timer); }, []);
   useEffect(() => {
     const open = window.setTimeout(() => setDoorOpen(true), 350);
-    const walk = window.setTimeout(() => setPlayer({ x: 50, y: 84, facing: "up" }), 850);
+    const walk = window.setTimeout(() => setPlayer({ x: 50, y: 82, facing: "up" }), 850);
     const done = window.setTimeout(() => { setEntering(false); setDoorOpen(false); mapRef.current?.focus(); }, 2000);
     return () => { clearTimeout(open); clearTimeout(walk); clearTimeout(done); };
   }, []);
@@ -144,6 +144,7 @@ export function OfficeDashboard() {
         <div className="agent-desk desk-review"><div className="monitor"><i /></div><div className="desk-chair" /><span>REVIEWER</span></div><div className="agent-desk desk-test"><div className="monitor"><i /></div><div className="desk-chair" /><span>SORA</span></div>
         <div className="office-sofa"><i /><i /><span /></div><div className="office-plant plant-left"><i /><b /></div><div className="office-plant plant-right"><i /><b /></div><div className="server-rack"><i /><i /><i /><b /></div>
         <div className={`auto-door ${doorOpen ? "open" : ""}`}><div className="door-sign">AUTO · ENTRANCE</div><i className="door-left" /><i className="door-right" /><b className="door-sensor" /></div>
+        <div className="move-help"><div><span>YOU</span><b>青いラベルがあなたです</b><small>WASD／矢印キー、または右下ボタンで移動</small></div><button onClick={()=>setPlayer({x:50,y:82,facing:"up"})}>入口へ戻る</button></div>
         {displayAgents.map((agent,index)=><RuntimeCharacter agent={agent} index={index} key={agent.id} />)}
         <div className={`business-player image-player face-${player.facing} ${entering ? "entering" : ""}`} style={{left:`${player.x}%`,top:`${player.y}%`}}><div className="player-arrow">YOU ▼</div><div className="player-art" /></div>
         {nearCodex && !chatOpen && <button className="talk-prompt" onClick={talk}><kbd>ENTER</kbd><span>Codexへ実タスクを依頼</span></button>}
