@@ -12,9 +12,12 @@ Drizzle support.
 
 ```bash
 npm install
-npm run dev
+npm run local
 npm run build
 ```
+
+`npm run local` starts both the site and its local Codex bridge. Open the
+`Local` URL printed in the terminal. Press Ctrl+C to stop both processes.
 
 This starter does not use `wrangler.jsonc`.
 
@@ -88,6 +91,7 @@ actions tied to the current ChatGPT user. Leave public content anonymous.
 ## Useful Commands
 
 - `npm run dev`: start local development
+- `npm run local`: start the site and local Codex bridge together
 - `npm run build`: verify the vinext build output
 - `npm test`: build the starter and verify its rendered loading skeleton
 - `npm run db:generate`: generate Drizzle migrations after schema changes
