@@ -21,7 +21,11 @@ interface ExecutionContext {
 
 const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
-  "script-src 'self'",
+  // vinext streams its hydration bootstrap and RSC payload through inline
+  // scripts. Blocking them leaves a server-rendered UI that cannot react to
+  // clicks. The app renders no user-controlled HTML, so allow only same-origin
+  // scripts plus the framework's inline bootstrap.
+  "script-src 'self' 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline'",
   "font-src 'self'",
   "img-src 'self' data:",
