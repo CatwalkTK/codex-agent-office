@@ -18,6 +18,10 @@ test("server-renders the Codex Office at the main route", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
+  assert.match(response.headers.get("content-security-policy") ?? "", /default-src 'self'/);
+  assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(response.headers.get("x-frame-options"), "DENY");
+  assert.match(response.headers.get("permissions-policy") ?? "", /camera=\(\)/);
 
   const html = await response.text();
   assert.match(html, /<title>Codex Office/);
@@ -56,7 +60,7 @@ test("ships the office as the primary product", async () => {
   assert.match(office, /handoff-route/);
   assert.match(office, /Office本体は保護/);
   assert.match(office, /type="file"/);
-  assert.match(office, /attachmentPaths/);
+  assert.match(office, /uploadId/);
   assert.match(office, /project-queue/);
   assert.match(office, /runningTasks/);
   assert.match(office, /workspace:snapshot\.workspace/);
@@ -91,6 +95,10 @@ test("ships the office as the primary product", async () => {
   assert.match(bridge, /isolatedProjectOnly/);
   assert.match(bridge, /--sandbox", "workspace-write/);
   assert.match(bridge, /saveAttachments/);
+  assert.match(bridge, /pendingUploads/);
+  assert.match(bridge, /confirmLocalAction/);
+  assert.match(bridge, /projectPublicId/);
+  assert.match(bridge, /O_NOFOLLOW/);
   assert.match(bridge, /\/attachments/);
   assert.match(bridge, /runningChildren/);
   assert.match(bridge, /\/workspace\/activate/);

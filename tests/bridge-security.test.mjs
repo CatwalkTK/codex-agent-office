@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, readFile, realpath, rm } from "node:fs/promises";
+import { access, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -34,6 +34,9 @@ test("protects the local Bridge with origin and pairing, then persists task chat
   const project = path.join(directory, "external-project");
   const history = path.join(directory, "codex-home", "office", "history.json");
   await mkdir(project, { recursive: true });
+  const outsideSecret = path.join(directory, "outside-secret.md");
+  await writeFile(outsideSecret, "SYMLINK_ESCAPE_SECRET", "utf8");
+  await symlink(outsideSecret, path.join(project, "README.md"));
   const resolvedProject = await realpath(project);
   const port = await freePort();
   const child = spawn(process.execPath, ["local-bridge.mjs"], {
@@ -47,6 +50,7 @@ test("protects the local Bridge with origin and pairing, then persists task chat
       CODEX_OFFICE_WORKSPACE: resolvedProject,
       CODEX_BIN: "/bin/echo",
       CODEX_OFFICE_CONFIRMATION: "off",
+      NODE_ENV: "test",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -62,11 +66,22 @@ test("protects the local Bridge with origin and pairing, then persists task chat
   const pairingCode = await waitFor(() => output.match(/pairing code: (\d{6})/i)?.[1]);
   const base = `http://127.0.0.1:${port}`;
 
+  const bridgePage = await fetch(`${base}/`);
+  assert.equal(bridgePage.status, 200);
+  assert.doesNotMatch(await bridgePage.text(), new RegExp(resolvedProject.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
   const rejectedOrigin = await fetch(`${base}/pair/status`, { headers: { Origin: "https://untrusted.example" } });
   assert.equal(rejectedOrigin.status, 403);
 
   const unpaired = await fetch(`${base}/snapshot`, { headers: { Origin: allowedOrigin } });
   assert.equal(unpaired.status, 401);
+
+  const oversized = await fetch(`${base}/pair`, {
+    method: "POST",
+    headers: { Origin: allowedOrigin, "Content-Type": "application/json" },
+    body: JSON.stringify({ code: pairingCode, padding: "x".repeat(25_000) }),
+  });
+  assert.equal(oversized.status, 413);
 
   const pairResponse = await fetch(`${base}/pair`, {
     method: "POST",
@@ -82,14 +97,42 @@ test("protects the local Bridge with origin and pairing, then persists task chat
 
   const snapshotResponse = await fetch(`${base}/snapshot`, { headers });
   assert.equal(snapshotResponse.status, 200);
-  assert.equal((await snapshotResponse.json()).workspace, resolvedProject);
+  const snapshot = await snapshotResponse.json();
+  assert.notEqual(snapshot.workspace, resolvedProject);
+  assert.equal(snapshot.workspace.length, 24);
+  assert.doesNotMatch(JSON.stringify(snapshot), new RegExp(resolvedProject.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.equal(snapshot.bridge.codexPath, null);
+  assert.doesNotMatch(JSON.stringify(snapshot), /SYMLINK_ESCAPE_SECRET/);
   const heartbeatResponse = await fetch(`${base}/session/heartbeat`, { method: "POST", headers });
   assert.equal(heartbeatResponse.status, 204);
+
+  const rejectedPath = await fetch(`${base}/workspace/activate`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ path: resolvedProject }),
+  });
+  assert.equal(rejectedPath.status, 409);
+
+  const attachmentResponse = await fetch(`${base}/attachments`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      workspace: snapshot.workspace,
+      attachments: [{ name: "brief.md", type: "text/markdown", data: Buffer.from("# Safe attachment").toString("base64") }],
+    }),
+  });
+  assert.equal(attachmentResponse.status, 201);
+  const attachment = await attachmentResponse.json();
+  assert.equal(typeof attachment.uploadId, "string");
+  assert.equal(attachment.uploadId.length, 32);
+  assert.equal(attachment.files[0].name, "brief.md");
+  assert.equal("path" in attachment.files[0], false);
+  await assert.rejects(access(path.join(project, ".codex-attachments")));
 
   const taskResponse = await fetch(`${base}/task`, {
     method: "POST",
     headers,
-    body: JSON.stringify({ workspace: resolvedProject, prompt: "Keep this task chat" }),
+    body: JSON.stringify({ workspace: snapshot.workspace, uploadId: attachment.uploadId, prompt: "Keep this task chat" }),
   });
   assert.equal(taskResponse.status, 202);
 

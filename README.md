@@ -1,139 +1,94 @@
 # Codex Agent Office
 
-A clean full-stack starter running on
-[vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
-Drizzle support.
+Codexのタスク実行状況を、ピクセルアートのオフィスとして可視化するWeb UIです。
+複数プロジェクトの並行タスク、エージェントの状態、ソースプレビュー、タスク別チャット履歴を一画面で確認できます。
 
-## Prerequisites
+公開UIだけではローカルファイルやCodexを操作できません。利用者自身のPCでLocal Bridgeを起動し、6桁コードとmacOSの確認画面で明示的に接続した場合だけ動作します。
 
-- Node.js `>=22.13.0`
+## 主な機能
 
-## Quick Start
+- オフィス内をキーボード・画面ボタンで移動
+- Codexに近づいてチャットWindowを開くゲーム風UI
+- Markdown対応チャット
+- 複数プロジェクトの登録と並行タスク実行
+- タスクごとに分離されたチャット履歴
+- Codexのコマンド、変更ファイル、進行状況の可視化
+- 添付ファイルの受け渡し
+- Local BridgeによるCodex自動検出
+
+## 必要環境
+
+- macOS
+- Node.js 22.13.0以上
+- ChatGPTデスクトップアプリ、またはCodex CLI
+- npm
+
+## インストール
 
 ```bash
+git clone https://github.com/CatwalkTK/codex-agent-office.git
+cd codex-agent-office
 npm install
 npm run local
-npm run build
 ```
 
-`npm run local` starts both the site and its local Codex bridge. Open the
-`Local` URL printed in the terminal. Press Ctrl+C to stop both processes.
+ターミナルに表示された`http://localhost:3000`をブラウザで開きます。
+`npm run local`はWeb UIとLocal Bridgeを同時に起動します。終了するときは`Ctrl+C`を押してください。
 
-## Secure local Bridge
+別々に起動する場合は、2つのターミナルで以下を実行します。
 
-When the Bridge starts, it prints a six-digit pairing code. Enter that code in
-the Office UI. The code is only for pairing and expires after ten minutes. The
-paired session remains valid until the browser tab closes, the user disconnects,
-or the Bridge stops. Pairing sessions are kept in memory and are never written
-to disk.
+```bash
+npm run dev
+npm run bridge
+```
 
-The Bridge only accepts requests from these origins by default:
+## Bridgeとの接続
 
-- `http://localhost:3000`
-- `http://127.0.0.1:3000`
-- `https://codex-agent-office.dattsu.chatgpt.site`
+1. `npm run bridge`を起動します。
+2. ターミナルまたは`http://127.0.0.1:4312`に表示される6桁コードを確認します。
+3. Office UIへコードを入力します。
+4. macOSに表示される接続確認で許可します。
 
-Add trusted origins with a comma-separated environment variable:
+ペアリングコードは10分で失効し、入力失敗は5回までです。接続トークンはメモリとブラウザタブ内だけに保存され、ファイルへ永続化されません。セッションは明示解除、Bridge停止、または無通信状態で失効します。
+
+## セキュリティ設計
+
+- Bridgeは`127.0.0.1`だけで待機します。
+- CORSは許可したOriginとの完全一致です。
+- 公開UIへローカルの絶対パスを返しません。プロジェクトは匿名IDで扱います。
+- ペアリング、添付保存、履歴削除、Codex実行はmacOS側で確認します。
+- 作業フォルダーはmacOSのフォルダー選択画面からのみ登録できます。
+- 添付はプロジェクト外の所有者専用一時領域へ保存し、タスク終了後に削除します。
+- ソースプレビューは作業フォルダー内の通常のテキスト系ソースに限定し、シンボリックリンクや秘密情報ファイルを拒否します。
+- Codexは`workspace-write`サンドボックスで、選択した外部プロジェクトを作業ディレクトリとして起動します。
+- WebレスポンスにはCSP、HSTS、クリックジャッキング対策などのセキュリティヘッダーを設定します。
+
+追加Originを許可する場合は、信頼できるサイトだけを指定してください。
 
 ```bash
 CODEX_OFFICE_ALLOWED_ORIGINS=https://office.example.com npm run bridge
 ```
 
-Every Codex task displays a native confirmation dialog on the local Mac before
-execution. The Bridge binds only to `127.0.0.1`.
+## 保存データ
 
-## Codex detection and history
+タスクとチャット履歴は`~/.codex/office/history.json`へ所有者専用権限で保存されます。APIキー、ペアリングトークン、添付内容は履歴へ保存しません。
 
-The Bridge checks `CODEX_BIN`, the ChatGPT desktop app, `PATH`, and common
-installation locations. To select a specific binary:
+作業フォルダーの登録情報は`~/.codex/office-workspace.json`へ所有者専用権限で保存されます。Office本体のフォルダーを作業対象として選択することはできません。
+
+## 確認コマンド
 
 ```bash
-CODEX_BIN=/path/to/codex npm run bridge
+npm run lint
+npm test
+npm audit
 ```
 
-Task and chat history is stored locally at `~/.codex/office/history.json` with
-owner-only file permissions. Pairing tokens, API keys, and attachment contents
-are not stored there. History survives a Bridge restart; an interrupted running
-task is restored as interrupted rather than resumed.
+## 公開ソースとライセンス
 
-This starter does not use `wrangler.jsonc`.
+ソースコードは[GitHub](https://github.com/CatwalkTK/codex-agent-office)で公開しています。
 
-## Included Shape
+本ソフトウェアは`AGPL-3.0-only`で提供します。改造版を配布する場合や、ネットワーク経由で利用者へ提供する場合は、GNU Affero General Public License v3.0の条件に従って対応ソースを利用者へ提供してください。完全な条件は[LICENSE](./LICENSE)を参照してください。
 
-- edit site code under `app/`
-- `.openai/hosting.json` declares optional Sites D1 and R2 bindings
-- `vite.config.ts` simulates declared bindings for local development
-- `db/schema.ts` starts intentionally empty
-- `examples/d1/` contains an optional D1 example surface
-- `drizzle.config.ts` supports local migration generation when needed
+## 注意
 
-## Workspace Auth Headers
-
-OpenAI workspace sites can read the current user's email from
-`oai-authenticated-user-email`.
-
-SIWC-authenticated workspace sites may also receive
-`oai-authenticated-user-full-name` when the user's SIWC profile has a non-empty
-`name` claim. The full-name value is percent-encoded UTF-8 and is accompanied by
-`oai-authenticated-user-full-name-encoding: percent-encoded-utf-8`.
-
-Treat the full name as optional and fall back to email when it is absent:
-
-```tsx
-import { headers } from "next/headers";
-
-export default async function Home() {
-  const requestHeaders = await headers();
-  const email = requestHeaders.get("oai-authenticated-user-email");
-  const encodedFullName = requestHeaders.get("oai-authenticated-user-full-name");
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get("oai-authenticated-user-full-name-encoding") ===
-      "percent-encoded-utf-8"
-      ? decodeURIComponent(encodedFullName)
-      : null;
-
-  const displayName = fullName ?? email;
-  // ...
-}
-```
-
-## Optional Dispatch-Owned ChatGPT Sign-In
-
-Import the ready-to-use helpers from `app/chatgpt-auth.ts` when the site needs
-optional or required ChatGPT sign-in:
-
-- Use `getChatGPTUser()` for optional signed-in UI.
-- Use `requireChatGPTUser(returnTo)` for server-rendered pages that should send
-  anonymous visitors through Sign in with ChatGPT.
-- Use `chatGPTSignInPath(returnTo)` and `chatGPTSignOutPath(returnTo)` for
-  browser links or actions.
-- Pass a same-origin relative `returnTo` path for the destination after sign-in
-  or sign-out. The helper validates and safely encodes it.
-- Mark protected pages with `export const dynamic = "force-dynamic"` because
-  they depend on per-request identity headers.
-
-Dispatch owns `/signin-with-chatgpt`, `/signout-with-chatgpt`, `/callback`, the
-OAuth cookies, and identity header injection. Do not implement app routes for
-those reserved paths. Routes that do not import and call the helper remain
-anonymous-compatible.
-
-SIWC establishes identity only; it does not prove workspace membership. Use the
-Sites hosting platform's access policy controls for workspace-wide restrictions,
-or enforce explicit server-side membership or allowlist checks.
-
-Use SIWC for account pages, user-specific dashboards, saved records, and write
-actions tied to the current ChatGPT user. Leave public content anonymous.
-
-## Useful Commands
-
-- `npm run dev`: start local development
-- `npm run local`: start the site and local Codex bridge together
-- `npm run build`: verify the vinext build output
-- `npm test`: build the starter and verify its rendered loading skeleton
-- `npm run db:generate`: generate Drizzle migrations after schema changes
-
-## Learn More
-
-- [vinext Documentation](https://github.com/cloudflare/vinext)
-- [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+Local Bridgeは利用者の権限でCodexを起動します。内容を理解できないタスク、添付、フォルダー操作はmacOSの確認画面で拒否してください。公開サイトとLocal Bridgeは、公式リポジトリから取得した版を使用してください。

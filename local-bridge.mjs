@@ -1,5 +1,6 @@
 import http from "node:http";
 import crypto from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -9,7 +10,7 @@ const CODEX_HOME = process.env.CODEX_HOME || path.join(process.env.HOME || "", "
 const WORKSPACE_CONFIG = process.env.CODEX_OFFICE_CONFIG || path.join(CODEX_HOME, "office-workspace.json");
 const HISTORY_FILE = process.env.CODEX_OFFICE_HISTORY || path.join(CODEX_HOME, "office", "history.json");
 const SYSTEM_ROOT = await fsp.realpath(process.cwd()).catch(() => path.resolve(process.cwd()));
-const ATTACHMENT_DIR = ".codex-attachments";
+const ATTACHMENT_ROOT = path.join(CODEX_HOME, "office", "attachments");
 const MAX_ATTACHMENT_FILES = 5;
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const MAX_ATTACHMENT_TOTAL = 25 * 1024 * 1024;
@@ -74,6 +75,7 @@ async function resolveSeparateProject(candidate) {
 
 let savedConfig = {};
 try { savedConfig = JSON.parse(await fsp.readFile(WORKSPACE_CONFIG, "utf8")); } catch {}
+await fsp.chmod(WORKSPACE_CONFIG, 0o600).catch(() => {});
 const configuredProjects = process.env.CODEX_OFFICE_WORKSPACE ? [process.env.CODEX_OFFICE_WORKSPACE] : [...(Array.isArray(savedConfig.projects) ? savedConfig.projects : []), savedConfig.workspace].filter(Boolean);
 const initialProjects = [];
 for (const candidate of configuredProjects) {
@@ -96,6 +98,7 @@ let pairingCode = String(crypto.randomInt(0, 1_000_000)).padStart(6, "0");
 let pairingExpiresAt = Date.now() + PAIRING_TTL_MS;
 let pairingAttempts = 0;
 const bridgeSessions = new Map();
+const pendingUploads = new Map();
 let historyWriteTimer = null;
 let sessionFile = null;
 let sessionOffset = 0;
@@ -223,15 +226,28 @@ function consumeRecord(record, origin = "session") {
 
 async function refreshSource(candidate = sourcePath) {
   if (!workspace) return;
-  const resolved = candidate && path.isAbsolute(candidate) ? path.resolve(candidate) : path.resolve(workspace, candidate || sourcePath);
-  if (!resolved.startsWith(`${workspace}${path.sep}`) && resolved !== workspace) return;
+  const requested = candidate && path.isAbsolute(candidate) ? path.resolve(candidate) : path.resolve(workspace, candidate || sourcePath);
+  if (!requested.startsWith(`${workspace}${path.sep}`) || !isSafePreviewFile(path.relative(workspace, requested))) return;
   try {
+    const resolved = await fsp.realpath(requested);
+    if (!resolved.startsWith(`${workspace}${path.sep}`)) return;
     const stat = await fsp.stat(resolved);
     if (!stat.isFile() || stat.size > 300_000) return;
     const text = await fsp.readFile(resolved, "utf8");
     sourcePath = path.relative(workspace, resolved);
     state.source = { path: sourcePath, lines: text.split("\n").slice(0, 240) };
   } catch {}
+}
+
+function isSafePreviewFile(relativePath) {
+  const normalized = String(relativePath || "").replaceAll("\\", "/").toLowerCase();
+  const base = path.posix.basename(normalized);
+  if (!/\.(?:md|txt|json|[cm]?[jt]sx?|css|html)$/i.test(base)) return false;
+  return !(
+    base === ".env" || base.startsWith(".env.") ||
+    /(?:^|[._-])(secret|secrets|credential|credentials|password|token|private)(?:[._-]|$)/.test(base) ||
+    /\.(?:pem|key|p12|pfx|jks|keystore)$/i.test(base)
+  );
 }
 
 async function findLatestSession() {
@@ -276,7 +292,57 @@ async function pollSession() {
   }
 }
 
-function snapshot() { return JSON.stringify(state); }
+function projectPublicId(projectPath) {
+  return projectPath ? crypto.createHash("sha256").update(`codex-office:${projectPath}`).digest("hex").slice(0, 24) : "";
+}
+
+function redactPublicText(value) {
+  let text = String(value || "");
+  for (const privatePath of [process.env.HOME, SYSTEM_ROOT, CODEX_HOME, ...projectPaths].filter(Boolean).sort((a, b) => b.length - a.length)) {
+    text = text.split(privatePath).join("<local-path>");
+  }
+  return text
+    .replace(/\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{16,}|AKIA[0-9A-Z]{16})\b/g, "[REDACTED]")
+    .replace(/((?:api[_-]?key|token|secret|password)\s*[:=]\s*)[^\s,;]+/gi, "$1[REDACTED]");
+}
+
+function publicEvent(event) {
+  return { ...event, label: redactPublicText(event.label), detail: redactPublicText(event.detail) };
+}
+
+function publicTask(task) {
+  const visible = { ...task };
+  delete visible.threadId;
+  const publicId = projectPublicId(task.workspace);
+  return {
+    ...visible,
+    projectId: publicId,
+    workspace: publicId,
+    prompt: redactPublicText(task.prompt),
+    attachmentPaths: (task.attachmentPaths || []).map((value) => path.basename(value)),
+    lastAgentMessage: redactPublicText(task.lastAgentMessage),
+    events: (task.events || []).map(publicEvent),
+    chat: (task.chat || []).map((message) => ({ ...message, text: redactPublicText(message.text) })),
+  };
+}
+
+function publicState() {
+  return {
+    ...state,
+    workspace: projectPublicId(workspace),
+    session: state.session ? `session-${crypto.createHash("sha256").update(state.session).digest("hex").slice(0, 12)}` : null,
+    projects: state.projects.map((project) => {
+      const id = projectPublicId(project.path);
+      return { ...project, id, path: id, taskPrompt: redactPublicText(project.taskPrompt) };
+    }),
+    tasks: state.tasks.map(publicTask),
+    events: state.events.map(publicEvent),
+    source: { path: state.source.path, lines: state.source.lines.map(redactPublicText) },
+    bridge: { ...state.bridge, codexPath: null },
+  };
+}
+
+function snapshot() { return JSON.stringify(publicState()); }
 async function persistHistory() {
   const directory = path.dirname(HISTORY_FILE);
   const temporary = `${HISTORY_FILE}.${process.pid}.tmp`;
@@ -358,14 +424,14 @@ function consumeTaskRecord(record, task) {
   updateParallelTask(task);
 }
 
-function runTask(prompt, attachmentPaths = [], targetWorkspace = workspace) {
+function runTask(prompt, attachmentPaths = [], targetWorkspace = workspace, uploadId = null) {
   if (!targetWorkspace) throw new Error("先にOfficeシステムとは別のプロジェクトフォルダーを選択してください");
   if (!CODEX_BIN || !CODEX_VERSION) throw new Error("Codexを検出できません。ChatGPTアプリまたはCodex CLIをインストールしてください");
   if (!isSeparateProject(targetWorkspace)) throw new Error("保護対象のOfficeシステムではタスクを実行できません");
   if ([...runningChildren.values()].some((entry) => entry.task.workspace === targetWorkspace)) throw new Error("このプロジェクトでは別のタスクが実行中です。別プロジェクトは同時実行できます");
   const projectName = path.basename(targetWorkspace);
   const submittedText = `${safeText(prompt, 1000)}${attachmentPaths.length ? `\n📎 ${attachmentPaths.map((file) => path.basename(file)).join(", ")}` : ""}`;
-  const task = { id: `task-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`, projectId: targetWorkspace, projectName, workspace: targetWorkspace, prompt: safeText(prompt, 1000), attachmentPaths, state: "starting", progress: 5, currentTool: null, currentFile: null, lastAgentMessage: "", startedAt: new Date().toISOString(), completedAt: null, updatedAt: new Date().toISOString(), changedFiles: [], events: [], chat: [], threadId: null, tokenUsage: null };
+  const task = { id: `task-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`, projectId: targetWorkspace, projectName, workspace: targetWorkspace, prompt: safeText(prompt, 1000), attachmentPaths: attachmentPaths.map((file) => path.basename(file)), state: "starting", progress: 5, currentTool: null, currentFile: null, lastAgentMessage: "", startedAt: new Date().toISOString(), completedAt: null, updatedAt: new Date().toISOString(), changedFiles: [], events: [], chat: [], threadId: null, tokenUsage: null };
   taskChat(task, "you", submittedText);
   taskChat(task, "system", `${projectName}でタスクを受け付けました。別タスクへ切り替えても処理は継続します。`);
   taskEvent(task, "task", "Codexを起動", task.prompt, "running");
@@ -373,7 +439,7 @@ function runTask(prompt, attachmentPaths = [], targetWorkspace = workspace) {
   const runningHistory = state.tasks.filter((item) => item.state === "working" || item.state === "starting");
   const completedHistory = state.tasks.filter((item) => item.state !== "working" && item.state !== "starting").slice(-24);
   state.tasks = [...completedHistory, ...runningHistory, task]; syncProjectSummaries(); if (task.workspace === workspace) syncActiveTaskView(); scheduleHistoryPersist(); broadcast();
-  const attachmentNote = attachmentPaths.length ? `\n\n次の添付ファイルが外部プロジェクト内に保存されています。内容を確認してタスクに利用してください。\n${attachmentPaths.map((file) => `- ${file}`).join("\n")}` : "";
+  const attachmentNote = attachmentPaths.length ? `\n\n次の添付ファイルがCodex Officeの保護された一時領域に保存されています。内容を確認してタスクに利用してください。\n${attachmentPaths.map((file) => `- ${file}`).join("\n")}` : "";
   const args = ["exec", "--json", "--color", "never", "--sandbox", "workspace-write", "--skip-git-repo-check", "-C", targetWorkspace, `${prompt}${attachmentNote}`];
   const child = spawn(CODEX_BIN, args, { cwd: targetWorkspace, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
   runningChildren.set(task.id, { child, task });
@@ -383,27 +449,44 @@ function runTask(prompt, attachmentPaths = [], targetWorkspace = workspace) {
     for (const line of lines) { try { consumeTaskRecord(JSON.parse(line), task); } catch {} }
   });
   child.stderr.on("data", (chunk) => { const text = chunk.toString(); taskEvent(task, "stderr", text.includes(" WARN ") ? "Codex警告" : "Codex stderr", text, text.includes(" WARN ") ? "warning" : "error"); updateParallelTask(task); });
-  child.on("error", (error) => { task.state = "error"; task.progress = 100; task.completedAt = new Date().toISOString(); taskChat(task, "system", error.message); taskEvent(task, "task", "Codex起動失敗", error.message, "error"); runningChildren.delete(task.id); updateParallelTask(task); });
+  child.on("error", (error) => { task.state = "error"; task.progress = 100; task.completedAt = new Date().toISOString(); taskChat(task, "system", error.message); taskEvent(task, "task", "Codex起動失敗", error.message, "error"); runningChildren.delete(task.id); void cleanupUpload(uploadId); updateParallelTask(task); });
   child.on("close", (code) => {
     runningChildren.delete(task.id);
+    void cleanupUpload(uploadId);
     if (task.state !== "complete" && task.state !== "error") { task.state = code === 0 ? "complete" : "error"; task.progress = 100; task.completedAt = new Date().toISOString(); task.currentTool = null; if (code !== 0) taskChat(task, "system", `Codexが終了しました（exit ${code}）`); taskEvent(task, "task", code === 0 ? "プロセス完了" : "Codex終了", `exit ${code}`, code === 0 ? "success" : "error"); }
     updateParallelTask(task);
   });
   return task;
 }
 
+class RequestError extends Error {
+  constructor(message, status = 400) { super(message); this.status = status; }
+}
+
 function readBody(req, limit = 20_000) {
   return new Promise((resolve, reject) => {
-    let body = "";
-    req.on("data", (chunk) => {
-      body += chunk;
-      if (body.length > limit) reject(new Error("request is too large"));
-    });
+    const contentType = String(req.headers["content-type"] || "").split(";", 1)[0].trim().toLowerCase();
+    if (contentType !== "application/json") { req.resume(); reject(new RequestError("Content-Type must be application/json", 415)); return; }
+    const declared = Number(req.headers["content-length"] || 0);
+    if (Number.isFinite(declared) && declared > limit) { req.resume(); reject(new RequestError("request is too large", 413)); return; }
+    const chunks = []; let size = 0; let settled = false;
+    const fail = (error) => { if (settled) return; settled = true; chunks.length = 0; reject(error); };
+    const onData = (chunk) => {
+      size += chunk.length;
+      if (size > limit) {
+        req.off("data", onData); req.resume(); fail(new RequestError("request is too large", 413)); return;
+      }
+      chunks.push(chunk);
+    };
+    req.setTimeout(15_000, () => { fail(new RequestError("request timed out", 408)); req.destroy(); });
+    req.on("data", onData);
     req.on("end", () => {
-      try { resolve(body ? JSON.parse(body) : {}); }
-      catch { reject(new Error("invalid JSON")); }
+      if (settled) return;
+      settled = true;
+      try { resolve(size ? JSON.parse(Buffer.concat(chunks, size).toString("utf8")) : {}); }
+      catch { reject(new RequestError("invalid JSON", 400)); }
     });
-    req.on("error", reject);
+    req.on("error", (error) => fail(error));
   });
 }
 
@@ -413,51 +496,75 @@ function safeAttachmentName(value, index) {
   return cleaned || `file-${index + 1}`;
 }
 
-async function registeredWorkspace(candidate = workspace) {
+async function registeredWorkspacePath(candidate = workspace) {
   const resolved = await resolveSeparateProject(candidate);
   if (!projectPaths.includes(resolved)) throw new Error("登録されていない外部プロジェクトです");
   return resolved;
 }
 
+async function registeredWorkspaceId(id = projectPublicId(workspace)) {
+  const candidate = projectPaths.find((projectPath) => safeEqual(projectPublicId(projectPath), String(id || "")));
+  if (!candidate) throw new Error("登録されていない外部プロジェクトです");
+  return registeredWorkspacePath(candidate);
+}
+
 async function saveAttachments(items, targetWorkspace = workspace) {
-  targetWorkspace = await registeredWorkspace(targetWorkspace);
+  targetWorkspace = await registeredWorkspacePath(targetWorkspace);
   if (!Array.isArray(items) || !items.length) throw new Error("添付ファイルがありません");
   if (items.length > MAX_ATTACHMENT_FILES) throw new Error(`添付できるファイルは最大${MAX_ATTACHMENT_FILES}件です`);
   const decoded = items.map((item, index) => {
-    const buffer = Buffer.from(String(item?.data || ""), "base64");
+    const encoded = item?.data;
+    if (typeof encoded !== "string" || encoded.length > Math.ceil(MAX_ATTACHMENT_BYTES * 4 / 3) + 8 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) throw new Error("添付ファイルの形式が不正です");
+    const buffer = Buffer.from(encoded, "base64");
     if (!buffer.length) throw new Error(`${safeAttachmentName(item?.name, index)} を読み込めません`);
     if (buffer.length > MAX_ATTACHMENT_BYTES) throw new Error("1ファイルの上限は10MBです");
     return { buffer, name: safeAttachmentName(item?.name, index), type: safeText(item?.type || "application/octet-stream", 100) };
   });
   if (decoded.reduce((sum, item) => sum + item.buffer.length, 0) > MAX_ATTACHMENT_TOTAL) throw new Error("添付ファイルの合計上限は25MBです");
-  const directory = path.join(targetWorkspace, ATTACHMENT_DIR);
-  await fsp.mkdir(directory, { recursive: true });
+  const projectDirectory = path.join(ATTACHMENT_ROOT, projectPublicId(targetWorkspace));
   const batch = new Date().toISOString().replace(/[:.]/g, "-");
-  const saved = [];
-  for (const [index, item] of decoded.entries()) {
-    const filename = `${batch}-${index + 1}-${item.name}`;
-    const absolute = path.join(directory, filename);
-    await fsp.writeFile(absolute, item.buffer, { flag: "wx" });
-    saved.push({ name: item.name, path: path.relative(targetWorkspace, absolute), size: item.buffer.length, type: item.type });
+  const directory = path.join(projectDirectory, `${batch}-${crypto.randomBytes(6).toString("hex")}`);
+  await fsp.mkdir(directory, { recursive: true, mode: 0o700 });
+  await fsp.chmod(directory, 0o700).catch(() => {});
+  const resolvedDirectory = await fsp.realpath(directory);
+  const saved = []; const savedPaths = [];
+  try {
+    for (const [index, item] of decoded.entries()) {
+      const filename = `${index + 1}-${item.name}`;
+      const absolute = path.join(resolvedDirectory, filename);
+      const handle = await fsp.open(absolute, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+      try { await handle.writeFile(item.buffer); } finally { await handle.close(); }
+      savedPaths.push(absolute);
+      saved.push({ name: item.name, size: item.buffer.length, type: item.type });
+    }
+  } catch (error) {
+    await Promise.all(savedPaths.map((file) => fsp.unlink(file).catch(() => {})));
+    await fsp.rm(resolvedDirectory, { recursive: true, force: true }).catch(() => {});
+    throw error;
   }
   addEvent("attachment", "ファイルを受領", saved.map((item) => item.name).join(", "), "success");
+  const uploadId = crypto.randomBytes(24).toString("base64url");
+  pendingUploads.set(uploadId, { workspace: targetWorkspace, paths: savedPaths, directory: resolvedDirectory, files: saved, createdAt: Date.now() });
   broadcast();
-  return saved;
+  return { uploadId, files: saved };
 }
 
-async function validateAttachmentPaths(values, targetWorkspace = workspace) {
-  if (!Array.isArray(values)) return [];
-  targetWorkspace = await registeredWorkspace(targetWorkspace);
-  const valid = [];
-  for (const value of values.slice(0, MAX_ATTACHMENT_FILES)) {
-    const relative = String(value || "");
-    if (!relative.startsWith(`${ATTACHMENT_DIR}${path.sep}`) && !relative.startsWith(`${ATTACHMENT_DIR}/`)) throw new Error("無効な添付ファイルパスです");
-    const absolute = await fsp.realpath(path.resolve(targetWorkspace, relative));
-    if (!absolute.startsWith(`${targetWorkspace}${path.sep}${ATTACHMENT_DIR}${path.sep}`)) throw new Error("添付ファイルがサンドボックス外です");
-    if (!(await fsp.stat(absolute)).isFile()) throw new Error("添付ファイルを読み込めません");
-    valid.push(path.relative(targetWorkspace, absolute));
+async function pendingUpload(uploadId, targetWorkspace) {
+  if (!uploadId) return null;
+  const upload = pendingUploads.get(String(uploadId));
+  if (!upload || upload.workspace !== targetWorkspace || Date.now() - upload.createdAt > 10 * 60 * 1000) throw new Error("添付ファイルの受け渡し情報が無効または期限切れです");
+  for (const file of upload.paths) {
+    const resolved = await fsp.realpath(file);
+    if (!resolved.startsWith(`${upload.directory}${path.sep}`) || !(await fsp.stat(resolved)).isFile()) throw new Error("添付ファイルを検証できません");
   }
-  return valid;
+  return upload;
+}
+
+async function cleanupUpload(uploadId) {
+  if (!uploadId) return;
+  const upload = pendingUploads.get(String(uploadId));
+  pendingUploads.delete(String(uploadId));
+  if (upload?.directory) await fsp.rm(upload.directory, { recursive: true, force: true }).catch(() => {});
 }
 
 function chooseFolder(prompt) {
@@ -493,11 +600,14 @@ function chooseFolders(prompt) {
 
 async function defaultSourceFor(root) {
   for (const candidate of ["README.md", "package.json", "app/page.tsx", "src/index.ts", "src/index.js"]) {
-    try { if ((await fsp.stat(path.join(root, candidate))).isFile()) return candidate; } catch {}
+    try {
+      const resolved = await fsp.realpath(path.join(root, candidate));
+      if (resolved.startsWith(`${root}${path.sep}`) && isSafePreviewFile(candidate) && (await fsp.stat(resolved)).isFile()) return candidate;
+    } catch {}
   }
   try {
     const entries = await fsp.readdir(root, { withFileTypes: true });
-    const file = entries.find((entry) => entry.isFile() && /\.(?:md|txt|json|[cm]?[jt]sx?|css|html)$/i.test(entry.name));
+    const file = entries.find((entry) => entry.isFile() && isSafePreviewFile(entry.name));
     if (file) return file.name;
   } catch {}
   return "";
@@ -506,8 +616,9 @@ async function defaultSourceFor(root) {
 async function switchWorkspace(nextWorkspace) {
   workspace = await resolveSeparateProject(nextWorkspace);
   if (!projectPaths.includes(workspace)) projectPaths.push(workspace);
-  await fsp.mkdir(CODEX_HOME, { recursive: true });
-  await fsp.writeFile(WORKSPACE_CONFIG, `${JSON.stringify({ projects: projectPaths, activeWorkspace: workspace }, null, 2)}\n`, "utf8");
+  await fsp.mkdir(CODEX_HOME, { recursive: true, mode: 0o700 });
+  await fsp.writeFile(WORKSPACE_CONFIG, `${JSON.stringify({ projects: projectPaths, activeWorkspace: workspace }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  await fsp.chmod(WORKSPACE_CONFIG, 0o600).catch(() => {});
   state.workspace = workspace;
   sessionFile = null;
   sessionOffset = 0;
@@ -525,19 +636,19 @@ async function selectWorkspace(data) {
   const mode = data?.mode;
   if (mode !== "existing" && mode !== "multiple" && mode !== "new") throw new Error("mode must be existing, multiple or new");
   if (mode === "multiple") {
-    const selectedFolders = Array.isArray(data.paths) ? data.paths : await chooseFolders("追加するプロジェクトを複数選択");
+    const selectedFolders = await chooseFolders("追加するプロジェクトを複数選択");
     if (!selectedFolders.length) throw new Error("追加するプロジェクトを選択してください");
     let selected = workspace;
     for (const selectedFolder of selectedFolders) selected = await switchWorkspace(selectedFolder);
     return selected;
   }
   if (mode === "existing") {
-    const selected = data.path || await chooseFolder("既存の作業フォルダーを選択");
+    const selected = await chooseFolder("既存の作業フォルダーを選択");
     return switchWorkspace(selected);
   }
   const name = String(data.name || "").trim();
   if (!name || name === "." || name === ".." || /[\/:\0]/.test(name)) throw new Error("有効なフォルダー名を入力してください");
-  const parent = data.path || await chooseFolder("新しい作業フォルダーの作成場所を選択");
+  const parent = await chooseFolder("新しい作業フォルダーの作成場所を選択");
   const realParent = await fsp.realpath(parent);
   const created = path.join(realParent, name);
   if (!isSeparateProject(created)) throw new Error("Officeシステムの中には作業フォルダーを作成できません");
@@ -581,15 +692,30 @@ function applyCors(req, res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
   res.setHeader("Access-Control-Allow-Private-Network", "true");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("Cross-Origin-Resource-Policy", "same-site");
+  res.setHeader("Cache-Control", "no-store");
   return true;
 }
 
-async function confirmTaskExecution(prompt, targetWorkspace, attachmentCount) {
-  if (process.env.CODEX_OFFICE_CONFIRMATION === "off") return true;
+function sendError(res, error, fallback, defaultStatus = 409) {
+  const status = Number(error?.status) || defaultStatus;
+  res.writeHead(status, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: error?.message || fallback }));
+}
+
+async function confirmLocalAction(title, lines, allowLabel) {
+  if (process.env.NODE_ENV === "test" && process.env.CODEX_OFFICE_CONFIRMATION === "off") return true;
   if (process.platform !== "darwin") throw new Error("このOSのローカル実行確認にはまだ対応していません");
-  const script = `on run argv\nset projectName to item 1 of argv\nset taskPrompt to item 2 of argv\nset attachmentInfo to item 3 of argv\ntry\nset answer to display dialog "プロジェクト: " & projectName & return & "依頼: " & taskPrompt & return & attachmentInfo buttons {"拒否", "実行を許可"} default button "実行を許可" cancel button "拒否" with title "Codex Office 実行確認" with icon caution giving up after 300\nreturn button returned of answer\non error\nreturn "拒否"\nend try\nend run`;
-  const result = await capture("/usr/bin/osascript", ["-e", script, path.basename(targetWorkspace), safeText(prompt, 500), attachmentCount ? `添付: ${attachmentCount}件` : "添付: なし"], 305_000);
-  return result.code === 0 && /実行を許可/.test(result.output);
+  const script = `on run argv\nset dialogTitle to item 1 of argv\nset dialogMessage to item 2 of argv\nset allowButton to item 3 of argv\ntry\nset answer to display dialog dialogMessage buttons {"拒否", allowButton} default button allowButton cancel button "拒否" with title dialogTitle with icon caution giving up after 300\nreturn button returned of answer\non error\nreturn "拒否"\nend try\nend run`;
+  const result = await capture("/usr/bin/osascript", ["-e", script, safeText(title, 120), lines.map((line) => safeText(line, 500)).join("\n"), safeText(allowLabel, 40)], 305_000);
+  return result.code === 0 && safeEqual(result.output.trim(), allowLabel);
+}
+
+async function confirmTaskExecution(prompt, targetWorkspace, attachmentCount) {
+  return confirmLocalAction("Codex Office 実行確認", [`プロジェクト: ${path.basename(targetWorkspace)}`, `依頼: ${prompt}`, attachmentCount ? `添付: ${attachmentCount}件` : "添付: なし"], "実行を許可");
 }
 
 async function codexLoginSummary() {
@@ -603,12 +729,14 @@ async function codexLoginSummary() {
 const server = http.createServer(async (req, res) => {
   if (!applyCors(req, res)) { res.writeHead(403, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "このサイトからのBridge接続は許可されていません" })); return; }
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
-  const url = new URL(req.url || "/", `http://${req.headers.host}`);
+  const url = new URL(req.url || "/", `http://127.0.0.1:${PORT}`);
   if (url.pathname === "/" && req.method === "GET") {
     ensurePairingCode();
     const pairDisplay = bridgeSessions.size ? "接続済み（接続解除またはBridge再起動で新しいコードを発行）" : pairingCode;
+    res.setHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'");
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
-    res.end(`<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Codex Office Bridge</title><style>html{color-scheme:dark;font:15px system-ui;background:#0d121b;color:#dbe6ef}body{max-width:720px;margin:10vh auto;padding:24px}.card{border:1px solid #39485a;background:#151d29;padding:28px;box-shadow:0 12px 45px #0008}.live{color:#67dfa8}code{display:block;margin-top:12px;padding:12px;background:#090d13;overflow-wrap:anywhere}.pair{font:700 28px ui-monospace;color:#f1ca6c;letter-spacing:.18em}</style><body><main class="card"><h1><span class="live">●</span> Codex Office Bridge</h1><p>Bridge はローカルPC上で安全に待機しています。</p><p>ペアリングコード</p><code class="pair">${pairDisplay}</code><p>Codex: ${CODEX_VERSION || "未検出"}</p><code>${(state.workspace || "外部プロジェクト未選択").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" })[character])}</code><p>履歴: ${HISTORY_FILE.replace(/[&<>"']/g, "")}</p></main></body></html>`);
+    const publicProject = workspace ? `${path.basename(workspace)} · ${projectPublicId(workspace)}` : "外部プロジェクト未選択";
+    res.end(`<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Codex Office Bridge</title><style>html{color-scheme:dark;font:15px system-ui;background:#0d121b;color:#dbe6ef}body{max-width:720px;margin:10vh auto;padding:24px}.card{border:1px solid #39485a;background:#151d29;padding:28px;box-shadow:0 12px 45px #0008}.live{color:#67dfa8}code{display:block;margin-top:12px;padding:12px;background:#090d13;overflow-wrap:anywhere}.pair{font:700 28px ui-monospace;color:#f1ca6c;letter-spacing:.18em}</style><body><main class="card"><h1><span class="live">●</span> Codex Office Bridge</h1><p>Bridge はローカルPC上で安全に待機しています。</p><p>ペアリングコード</p><code class="pair">${pairDisplay}</code><p>Codex: ${CODEX_VERSION || "未検出"}</p><code>${publicProject.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" })[character])}</code><p>履歴と添付は所有者専用の保護領域へ保存されます。</p></main></body></html>`);
     return;
   }
   if (url.pathname === "/pair/status" && req.method === "GET") {
@@ -624,9 +752,12 @@ const server = http.createServer(async (req, res) => {
       if (pairingAttempts >= MAX_PAIRING_ATTEMPTS) { res.writeHead(429, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "入力回数の上限に達しました。Bridgeを再起動してください" })); return; }
       const data = await readBody(req); const supplied = String(data.code || "").replace(/\D/g, "");
       if (!safeEqual(supplied, pairingCode)) { pairingAttempts += 1; res.writeHead(401, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "ペアリングコードが正しくありません", remaining: Math.max(0, MAX_PAIRING_ATTEMPTS - pairingAttempts) })); return; }
+      const origin = String(req.headers.origin || "ローカルアプリ");
+      const approved = await confirmLocalAction("Codex Office ペアリング確認", [`接続元: ${origin}`, "許可範囲: プロジェクト状態・チャット・安全なソースプレビュー", "ファイル保存・履歴削除・Codex実行は操作ごとに再確認します"], "接続を許可");
+      if (!approved) { res.writeHead(403, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "ローカル確認でペアリングが拒否されました" })); return; }
       const token = crypto.randomBytes(32).toString("base64url"); bridgeSessions.set(token, Date.now()); pairingCode = ""; pairingExpiresAt = 0; state.bridge.paired = true;
       res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" }); res.end(JSON.stringify({ paired: true, token, codex: await codexLoginSummary() }));
-    } catch (error) { res.writeHead(409, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: error.message || "ペアリングできませんでした" })); }
+    } catch (error) { sendError(res, error, "ペアリングできませんでした"); }
     return;
   }
   if (!isAuthorized(req)) { res.writeHead(401, { "Content-Type": "application/json", "Cache-Control": "no-store" }); res.end(JSON.stringify({ error: "Bridgeとのペアリングが必要です", code: "PAIRING_REQUIRED" })); return; }
@@ -640,8 +771,12 @@ const server = http.createServer(async (req, res) => {
   }
   if (url.pathname === "/codex/status" && req.method === "GET") { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(await codexLoginSummary())); return; }
   if (url.pathname === "/history" && req.method === "DELETE") {
-    state.tasks = []; syncActiveTaskView(); await persistHistory(); broadcast();
-    res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ cleared: true })); return;
+    try {
+      const approved = await confirmLocalAction("Codex Office 履歴削除", ["保存済みのタスクとチャット履歴をすべて削除します", "この操作は元に戻せません"], "履歴を削除");
+      if (!approved) { res.writeHead(403, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "ローカル確認で履歴削除が拒否されました" })); return; }
+      state.tasks = []; syncActiveTaskView(); await persistHistory(); broadcast();
+      res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ cleared: true })); return;
+    } catch (error) { sendError(res, error, "履歴を削除できませんでした"); return; }
   }
   if (url.pathname === "/events" && req.method === "GET") {
     res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
@@ -651,12 +786,15 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === "/attachments" && req.method === "POST") {
     try {
       const data = await readBody(req, 40_000_000);
-      const files = await saveAttachments(data.attachments, data.workspace || workspace);
+      const targetWorkspace = await registeredWorkspaceId(data.workspace || projectPublicId(workspace));
+      const fileNames = Array.isArray(data.attachments) ? data.attachments.slice(0, MAX_ATTACHMENT_FILES).map((item, index) => safeAttachmentName(item?.name, index)) : [];
+      const approved = await confirmLocalAction("Codex Office 添付保存", [`プロジェクト: ${path.basename(targetWorkspace)}`, `ファイル: ${fileNames.join(", ") || "なし"}`, "添付は保護された一時領域へ保存され、タスク終了後に削除されます"], "添付を許可");
+      if (!approved) { res.writeHead(403, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "ローカル確認で添付保存が拒否されました" })); return; }
+      const result = await saveAttachments(data.attachments, targetWorkspace);
       res.writeHead(201, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ files }));
+      res.end(JSON.stringify(result));
     } catch (error) {
-      res.writeHead(409, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: error?.message || "ファイルを添付できませんでした" }));
+      sendError(res, error, "ファイルを添付できませんでした");
     }
     return;
   }
@@ -665,33 +803,35 @@ const server = http.createServer(async (req, res) => {
       const data = await readBody(req);
       const selected = await selectWorkspace(data);
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ workspace: selected, snapshot: state }));
+      res.end(JSON.stringify({ workspace: projectPublicId(selected), snapshot: publicState() }));
     } catch (error) {
       const cancelled = /キャンセル/.test(error?.message || "");
-      res.writeHead(cancelled ? 400 : 409, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: error?.message || "作業フォルダーを変更できませんでした" }));
+      sendError(res, error, "作業フォルダーを変更できませんでした", cancelled ? 400 : 409);
     }
     return;
   }
   if (url.pathname === "/workspace/activate" && req.method === "POST") {
     try {
-      const data = await readBody(req); const selected = await registeredWorkspace(data.path);
+      const data = await readBody(req); const selected = await registeredWorkspaceId(data.projectId || data.path);
       await switchWorkspace(selected);
-      res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ workspace: selected, snapshot: state }));
+      res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ workspace: projectPublicId(selected), snapshot: publicState() }));
     } catch (error) {
-      res.writeHead(409, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: error?.message || "プロジェクトを切り替えられませんでした" }));
+      sendError(res, error, "プロジェクトを切り替えられませんでした");
     }
     return;
   }
   if (url.pathname === "/task" && req.method === "POST") {
+    let uploadId = null;
     try {
-      const data = await readBody(req); const targetWorkspace = await registeredWorkspace(data.workspace || workspace); const attachmentPaths = await validateAttachmentPaths(data.attachmentPaths, targetWorkspace);
+      const data = await readBody(req); uploadId = data.uploadId || null; const targetWorkspace = await registeredWorkspaceId(data.workspace || projectPublicId(workspace)); const upload = await pendingUpload(uploadId, targetWorkspace); const attachmentPaths = upload?.paths || [];
+      if (data.prompt !== undefined && typeof data.prompt !== "string") throw new RequestError("prompt must be a string", 400);
       const prompt = data.prompt?.trim() || (attachmentPaths.length ? "添付ファイルを確認してください。" : "");
       if (!prompt) throw new Error("prompt is required");
+      if (prompt.length > 12_000) throw new RequestError("prompt is too long", 413);
       const approved = await confirmTaskExecution(prompt, targetWorkspace, attachmentPaths.length);
-      if (!approved) { res.writeHead(403, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "ローカル確認でタスクが拒否されました" })); return; }
-      const task = runTask(prompt, attachmentPaths, targetWorkspace); res.writeHead(202, { "Content-Type": "application/json" }); res.end(JSON.stringify({ accepted: true, taskId: task.id, project: targetWorkspace, attachments: attachmentPaths }));
-    } catch (error) { res.writeHead(409, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: error.message })); }
+      if (!approved) { await cleanupUpload(uploadId); res.writeHead(403, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "ローカル確認でタスクが拒否されました" })); return; }
+      const task = runTask(prompt, attachmentPaths, targetWorkspace, uploadId); res.writeHead(202, { "Content-Type": "application/json" }); res.end(JSON.stringify({ accepted: true, taskId: task.id, projectId: projectPublicId(targetWorkspace), attachments: attachmentPaths.map((file) => path.basename(file)) }));
+    } catch (error) { await cleanupUpload(uploadId); sendError(res, error, "タスクを開始できませんでした"); }
     return;
   }
   res.writeHead(404); res.end("Not found");
@@ -716,12 +856,17 @@ setInterval(() => {
   state.bridge.paired = bridgeSessions.size > 0;
   if (!bridgeSessions.size) rotatePairingCode();
 }, 30_000).unref();
+setInterval(() => {
+  const cutoff = Date.now() - 10 * 60 * 1000;
+  for (const [uploadId, upload] of pendingUploads) if (upload.createdAt < cutoff) void cleanupUpload(uploadId);
+}, 60_000).unref();
 
 let shuttingDown = false;
 async function shutdown() {
   if (shuttingDown) return; shuttingDown = true;
   if (historyWriteTimer) clearTimeout(historyWriteTimer);
   await persistHistory().catch(() => {});
+  await Promise.all([...pendingUploads.keys()].map((uploadId) => cleanupUpload(uploadId)));
   for (const { child } of runningChildren.values()) child.kill("SIGTERM");
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 1_000).unref();
