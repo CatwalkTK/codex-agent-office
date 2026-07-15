@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChatMarkdown } from "./ChatMarkdown";
 import { WorkspacePicker } from "./WorkspacePicker";
 
 type Facing = "up" | "down" | "left" | "right";
@@ -16,6 +17,7 @@ type Snapshot = {
   events: RuntimeEvent[]; source: { path: string; lines: string[] }; agents: AgentState[];
   sandbox?: { enabled: boolean; mode: string; isolatedProjectOnly: boolean; systemProtected: boolean };
   projects: ProjectSummary[]; tasks: ParallelTask[];
+  bridge?: { paired: boolean; codexFound: boolean; codexPath: string | null; codexVersion: string | null; historyPersistent: boolean };
 };
 
 const BRIDGE = "http://127.0.0.1:4312";
@@ -66,17 +68,58 @@ export function OfficeDashboard() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [bridgeToken, setBridgeToken] = useState("");
+  const [pairingRequired, setPairingRequired] = useState(false);
+  const [pairingCode, setPairingCode] = useState("");
+  const [pairingBusy, setPairingBusy] = useState(false);
+  const [pairingMessage, setPairingMessage] = useState("");
   const [now, setNow] = useState(Date.now());
   const inputRef = useRef<HTMLInputElement>(null);
   const mapRef = useRef<HTMLDivElement>(null);
   const nearCodex = Math.hypot(player.x - 50, player.y - 37) < 10;
 
-  useEffect(() => {
-    const stream = new EventSource(`${BRIDGE}/events`);
-    stream.onmessage = (event) => { try { setSnapshot(JSON.parse(event.data)); setBridgeConnected(true); } catch {} };
-    stream.onerror = () => setBridgeConnected(false);
-    return () => stream.close();
+  const clearPairing = useCallback(() => {
+    window.sessionStorage.removeItem("codex-office-bridge-token"); setBridgeToken(""); setBridgeConnected(false); setPairingRequired(true);
   }, []);
+
+  const bridgeFetch = useCallback((pathname: string, init: RequestInit = {}) => {
+    const headers = new Headers(init.headers); if (bridgeToken) headers.set("Authorization", `Bearer ${bridgeToken}`);
+    return fetch(`${BRIDGE}${pathname}`, { ...init, headers }).then((response) => { if (response.status === 401) clearPairing(); return response; });
+  }, [bridgeToken, clearPairing]);
+
+  useEffect(() => {
+    const saved = window.sessionStorage.getItem("codex-office-bridge-token") || "";
+    if (saved) setBridgeToken(saved); else setPairingRequired(true);
+  }, []);
+
+  useEffect(() => {
+    if (!bridgeToken) return;
+    const controller = new AbortController(); let active = true;
+    void (async () => {
+      try {
+        const response = await fetch(`${BRIDGE}/events`, { headers:{ Authorization:`Bearer ${bridgeToken}` }, signal:controller.signal });
+        if (response.status === 401) { if (active) clearPairing(); return; }
+        if (!response.ok || !response.body) throw new Error("Bridge stream unavailable");
+        setPairingRequired(false); setBridgeConnected(true);
+        const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = "";
+        while (active) {
+          const { value, done } = await reader.read(); if (done) break;
+          buffer += decoder.decode(value, { stream:true }); const blocks = buffer.split("\n\n"); buffer = blocks.pop() || "";
+          for (const block of blocks) {
+            const data = block.split("\n").filter((line)=>line.startsWith("data: ")).map((line)=>line.slice(6)).join("\n");
+            if (data) { try { setSnapshot(JSON.parse(data)); setBridgeConnected(true); } catch {} }
+          }
+        }
+      } catch (error) { if (active && !(error instanceof DOMException && error.name === "AbortError")) setBridgeConnected(false); }
+    })();
+    return () => { active = false; controller.abort(); };
+  }, [bridgeToken, clearPairing]);
+
+  useEffect(() => {
+    if (!bridgeToken) return;
+    const heartbeat = window.setInterval(() => { void bridgeFetch("/session/heartbeat", { method:"POST" }).catch(() => setBridgeConnected(false)); }, 30_000);
+    return () => window.clearInterval(heartbeat);
+  }, [bridgeToken, bridgeFetch]);
 
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(timer); }, []);
   useEffect(() => {
@@ -130,12 +173,29 @@ export function OfficeDashboard() {
   }, [chatOpen]);
   const talk = useCallback(() => { if (nearCodex) setChatOpen(true); }, [nearCodex]);
 
+  async function pairBridge(event: FormEvent) {
+    event.preventDefault(); if (pairingBusy || pairingCode.length !== 6) return;
+    setPairingBusy(true); setPairingMessage("");
+    try {
+      const response = await fetch(`${BRIDGE}/pair`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ code:pairingCode }) });
+      const result = await response.json(); if (!response.ok) throw new Error(result.error || "ペアリングできませんでした");
+      window.sessionStorage.setItem("codex-office-bridge-token", result.token); setBridgeToken(result.token); setPairingRequired(false); setPairingCode("");
+      if (!result.codex?.found) setPairingMessage("Codexを検出できません。ChatGPTアプリまたはCodex CLIを確認してください。");
+    } catch (error) { setPairingMessage(error instanceof Error ? error.message : "Bridgeへ接続できません"); }
+    finally { setPairingBusy(false); }
+  }
+
+  async function unpairBridge() {
+    try { await bridgeFetch("/unpair", { method:"POST" }); } catch {}
+    clearPairing(); setSnapshot(emptySnapshot); setPairingMessage("接続を解除しました。Bridgeに表示された新しいコードを入力してください。");
+  }
+
   async function activateProject(projectPath: string, taskId: string | null = null) {
     setSelectedTaskId(taskId);
     setMessages([]);
     if (!bridgeConnected || projectPath === snapshot.workspace) return;
     try {
-      const response = await fetch(`${BRIDGE}/workspace/activate`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ path:projectPath }) });
+      const response = await bridgeFetch("/workspace/activate", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ path:projectPath }) });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "プロジェクトを切り替えられませんでした");
       setSnapshot(result.snapshot);
@@ -188,11 +248,11 @@ export function OfficeDashboard() {
       let attachmentPaths: string[] = [];
       if (files.length) {
         const encoded = await Promise.all(files.map(encodeFile));
-        const upload = await fetch(`${BRIDGE}/attachments`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ attachments:encoded, workspace:snapshot.workspace }) });
+        const upload = await bridgeFetch("/attachments", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ attachments:encoded, workspace:snapshot.workspace }) });
         const uploaded = await upload.json(); if (!upload.ok) throw new Error(uploaded.error||"ファイルを添付できませんでした");
         attachmentPaths = uploaded.files.map((file:{path:string})=>file.path);
       }
-      const response = await fetch(`${BRIDGE}/task`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ prompt:requestText, attachmentPaths, workspace:snapshot.workspace }) });
+      const response = await bridgeFetch("/task", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ prompt:requestText, attachmentPaths, workspace:snapshot.workspace }) });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "タスクを開始できませんでした");
       setAttachments([]);
@@ -208,7 +268,7 @@ export function OfficeDashboard() {
     <header className="office-topbar">
       <div className="office-brand"><span>C</span><div><b>CODEX & CO.</b><small>REAL RUNTIME OFFICE</small></div></div>
       <div className="office-title"><i className={`live-dot ${bridgeConnected ? "" : "offline"}`} />{bridgeConnected ? "ローカルCodex接続中" : "ローカルブリッジ未接続"}</div>
-      <div className="office-meta"><WorkspacePicker workspace={snapshot.workspace} connected={bridgeConnected} projects={snapshot.projects} onWorkspaceChanged={(workspace,projects)=>{setSelectedTaskId(null);setMessages([]);setSnapshot((current)=>({...current,workspace,projects:projects||current.projects}));}}/><span>{snapshot.session ? snapshot.session.slice(-18) : "NO SESSION"}</span><div className="user-chip">J</div></div>
+      <div className="office-meta"><WorkspacePicker workspace={snapshot.workspace} connected={bridgeConnected} projects={snapshot.projects} bridgeToken={bridgeToken} onWorkspaceChanged={(workspace,projects)=>{setSelectedTaskId(null);setMessages([]);setSnapshot((current)=>({...current,workspace,projects:projects||current.projects}));}}/>{bridgeConnected&&<button className="bridge-session-button" type="button" onClick={()=>void unpairBridge()} title="Bridgeとの接続を解除">PAIRED · 解除</button>}<span>{snapshot.session ? snapshot.session.slice(-18) : "NO SESSION"}</span><div className="user-chip">J</div></div>
     </header>
 
     <section className="office-stage">
@@ -241,9 +301,11 @@ export function OfficeDashboard() {
       <section className="agent-now"><div className="agent-now-head"><span>OFFICE ROLES · REAL EVENT MAPPING</span><b>{displayAgents.filter(agent=>agent.state==="working").length} active</b></div>{displayAgents.map((agent)=><div key={agent.id}><i className={`agent-state-dot ${agent.state}`} /><span><b>{agent.name}</b><small>{agent.tool||agent.role}</small></span><em className={agent.state==="working"?"working":""}>{agent.state}</em></div>)}</section>
     </aside>
 
+    {pairingRequired&&<div className="pairing-backdrop"><section className="pairing-dialog" role="dialog" aria-modal="true" aria-labelledby="pairing-title"><div className="pairing-lock">⌁</div><small>LOCAL BRIDGE SECURITY</small><h2 id="pairing-title">このPCのBridgeと接続</h2><p>Bridgeを起動したターミナル、または <a href="http://127.0.0.1:4312/" target="_blank" rel="noreferrer">ローカルBridge画面</a> に表示される6桁コードを入力してください。</p><form onSubmit={pairBridge}><label htmlFor="pairing-code">PAIRING CODE</label><input id="pairing-code" value={pairingCode} onChange={(event)=>setPairingCode(event.target.value.replace(/\D/g,"").slice(0,6))} inputMode="numeric" autoComplete="one-time-code" placeholder="000000" autoFocus/><button type="submit" disabled={pairingBusy||pairingCode.length!==6}>{pairingBusy?"接続中…":"Bridgeへ接続"}</button></form>{pairingMessage&&<div className="pairing-message">{pairingMessage}</div>}<footer><span>コードは接続時だけ使用</span><span>接続はタブ終了・解除・Bridge停止まで維持</span></footer></section></div>}
+
     {chatOpen&&<div className="chat-backdrop"><section className="boss-chat" role="dialog" aria-modal="true">
       <header><div className="chat-portrait image-portrait"/><div><small>{selectedTask?`TASK CHAT · ${selectedTask.id.slice(-6)}`:"NEW ISOLATED TASK"}</small><h2>{selectedTask?selectedTask.projectName:"Codexへ指示"}</h2><span><i className={bridgeConnected&&snapshot.workspace?"":"offline"}/>{!bridgeConnected?"ブリッジ未接続":selectedTask?`${selectedTask.state} · ${selectedTask.progress}% · ${selectedTask.currentTool||"待機"}`:snapshot.workspace?"新しいタスクを開始できます":"外部プロジェクト未選択"}</span></div><button onClick={()=>setChatOpen(false)}>×</button></header>
-      <div className="chat-log" key={selectedTask?.id||"new"} data-task-id={selectedTask?.id||"new"}>{chatMessages.length?chatMessages.map((message,index)=><div className={`chat-message ${message.from}`} key={message.id||index}><b>{message.from==="you"?"あなた":message.from==="codex"?"Codex":"System"}</b><p>{message.text}</p></div>):<div className="chat-empty">{snapshot.workspace?"新しい指示を送るか、右側のタスクを選択すると、そのタスク専用のチャット履歴が表示されます。":"右上のPROJECTSから外部プロジェクトを選択してください。"}</div>}{(submitting||selectedTask?.state==="working"||selectedTask?.state==="starting")&&<div className="chat-message codex pending"><b>Codex</b><p>{submitting?"タスクを登録しています…":`${selectedTask?.currentTool||"処理"}を実行中… ${selectedTask?.progress||0}%`}</p></div>}</div>
+      <div className="chat-log" key={selectedTask?.id||"new"} data-task-id={selectedTask?.id||"new"}>{chatMessages.length?chatMessages.map((message,index)=><div className={`chat-message ${message.from}`} key={message.id||index}><b>{message.from==="you"?"あなた":message.from==="codex"?"Codex":"System"}</b><ChatMarkdown text={message.text}/></div>):<div className="chat-empty">{snapshot.workspace?"新しい指示を送るか、右側のタスクを選択すると、そのタスク専用のチャット履歴が表示されます。":"右上のPROJECTSから外部プロジェクトを選択してください。"}</div>}{(submitting||selectedTask?.state==="working"||selectedTask?.state==="starting")&&<div className="chat-message codex pending"><b>Codex</b><p>{submitting?"タスクを登録しています…":`${selectedTask?.currentTool||"処理"}を実行中… ${selectedTask?.progress||0}%`}</p></div>}</div>
       <form className="chat-composer" onSubmit={submitTask} onDragOver={(event)=>event.preventDefault()} onDrop={(event)=>{event.preventDefault();if(snapshot.workspace)addAttachments(event.dataTransfer.files)}}>{attachments.length>0&&<div className="attachment-list">{attachments.map((file,index)=><div key={`${file.name}-${file.lastModified}`}><span>▤</span><b>{file.name}</b><small>{file.size<1024*1024?`${Math.ceil(file.size/1024)}KB`:`${(file.size/1024/1024).toFixed(1)}MB`}</small><button type="button" onClick={()=>setAttachments((current)=>current.filter((_,itemIndex)=>itemIndex!==index))} aria-label={`${file.name}を削除`}>×</button></div>)}</div>}<div className="chat-compose-row"><label className="attachment-button" aria-label="ファイルを添付">📎<span>ファイル</span><input type="file" multiple disabled={submitting||!snapshot.workspace} onChange={(event)=>{if(event.target.files)addAttachments(event.target.files);event.target.value=""}}/></label><input className="task-input" ref={inputRef} value={chatInput} onChange={(event)=>setChatInput(event.target.value)} placeholder={snapshot.workspace?`${snapshot.workspace.split("/").pop()}で新しいタスクを開始…`:"先に外部プロジェクトを選択"} disabled={submitting||!snapshot.workspace}/><button type="submit" disabled={submitting||!snapshot.workspace||(!chatInput.trim()&&!attachments.length)}>新規実行 ↗</button></div><small className="attachment-hint">表示中の履歴はタスク専用 · 新規送信すると新しいタスクチャットを作成</small></form>
       <footer><span>右側のタスクをクリックしてチャット切替</span><span>{selectedTask?selectedTask.id:"NEW TASK"}</span></footer>
     </section></div>}

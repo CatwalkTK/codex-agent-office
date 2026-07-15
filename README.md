@@ -1,4 +1,4 @@
-# vinext-starter
+# Codex Agent Office
 
 A clean full-stack starter running on
 [vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
@@ -18,6 +18,43 @@ npm run build
 
 `npm run local` starts both the site and its local Codex bridge. Open the
 `Local` URL printed in the terminal. Press Ctrl+C to stop both processes.
+
+## Secure local Bridge
+
+When the Bridge starts, it prints a six-digit pairing code. Enter that code in
+the Office UI. The code is only for pairing and expires after ten minutes. The
+paired session remains valid until the browser tab closes, the user disconnects,
+or the Bridge stops. Pairing sessions are kept in memory and are never written
+to disk.
+
+The Bridge only accepts requests from these origins by default:
+
+- `http://localhost:3000`
+- `http://127.0.0.1:3000`
+- `https://codex-agent-office.dattsu.chatgpt.site`
+
+Add trusted origins with a comma-separated environment variable:
+
+```bash
+CODEX_OFFICE_ALLOWED_ORIGINS=https://office.example.com npm run bridge
+```
+
+Every Codex task displays a native confirmation dialog on the local Mac before
+execution. The Bridge binds only to `127.0.0.1`.
+
+## Codex detection and history
+
+The Bridge checks `CODEX_BIN`, the ChatGPT desktop app, `PATH`, and common
+installation locations. To select a specific binary:
+
+```bash
+CODEX_BIN=/path/to/codex npm run bridge
+```
+
+Task and chat history is stored locally at `~/.codex/office/history.json` with
+owner-only file permissions. Pairing tokens, API keys, and attachment contents
+are not stored there. History survives a Bridge restart; an interrupted running
+task is restored as interrupted rather than resumed.
 
 This starter does not use `wrangler.jsonc`.
 

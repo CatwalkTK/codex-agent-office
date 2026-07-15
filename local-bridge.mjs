@@ -1,4 +1,5 @@
 import http from "node:http";
+import crypto from "node:crypto";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -6,11 +7,55 @@ import { spawn } from "node:child_process";
 const PORT = Number(process.env.CODEX_OFFICE_PORT || 4312);
 const CODEX_HOME = process.env.CODEX_HOME || path.join(process.env.HOME || "", ".codex");
 const WORKSPACE_CONFIG = process.env.CODEX_OFFICE_CONFIG || path.join(CODEX_HOME, "office-workspace.json");
+const HISTORY_FILE = process.env.CODEX_OFFICE_HISTORY || path.join(CODEX_HOME, "office", "history.json");
 const SYSTEM_ROOT = await fsp.realpath(process.cwd()).catch(() => path.resolve(process.cwd()));
 const ATTACHMENT_DIR = ".codex-attachments";
 const MAX_ATTACHMENT_FILES = 5;
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const MAX_ATTACHMENT_TOTAL = 25 * 1024 * 1024;
+const PAIRING_TTL_MS = 10 * 60 * 1000;
+const SESSION_IDLE_MS = 3 * 60 * 1000;
+const MAX_PAIRING_ATTEMPTS = 5;
+const DEFAULT_ALLOWED_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000", "https://codex-agent-office.dattsu.chatgpt.site"];
+const allowedOrigins = new Set([...DEFAULT_ALLOWED_ORIGINS, ...(process.env.CODEX_OFFICE_ALLOWED_ORIGINS || "").split(",").map((value) => value.trim()).filter(Boolean)]);
+
+async function isExecutable(candidate) {
+  if (!candidate) return false;
+  try { await fsp.access(candidate, process.platform === "win32" ? undefined : 1); return (await fsp.stat(candidate)).isFile(); } catch { return false; }
+}
+
+async function detectCodexBinary() {
+  const candidates = [
+    process.env.CODEX_BIN,
+    process.platform === "darwin" ? "/Applications/ChatGPT.app/Contents/Resources/codex" : "",
+    process.platform === "darwin" ? path.join(process.env.HOME || "", "Applications/ChatGPT.app/Contents/Resources/codex") : "",
+    process.platform === "win32" ? path.join(process.env.LOCALAPPDATA || "", "Programs", "ChatGPT", "resources", "codex.exe") : "",
+    "/opt/homebrew/bin/codex", "/usr/local/bin/codex", "/usr/bin/codex",
+  ];
+  const pathNames = process.platform === "win32" ? ["codex.exe", "codex.cmd", "codex"] : ["codex"];
+  for (const directory of (process.env.PATH || "").split(path.delimiter).filter(Boolean)) for (const name of pathNames) candidates.push(path.join(directory, name));
+  for (const candidate of [...new Set(candidates.filter(Boolean))]) if (await isExecutable(candidate)) return candidate;
+  return "";
+}
+
+function capture(command, args, timeoutMs = 5_000) {
+  return new Promise((resolve) => {
+    if (!command) { resolve({ code: 127, output: "" }); return; }
+    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"], env: process.env });
+    let output = "";
+    const timer = setTimeout(() => child.kill("SIGTERM"), timeoutMs);
+    child.stdout.on("data", (chunk) => { output += chunk.toString(); });
+    child.stderr.on("data", (chunk) => { output += chunk.toString(); });
+    child.on("error", () => { clearTimeout(timer); resolve({ code: 127, output }); });
+    child.on("close", (code) => { clearTimeout(timer); resolve({ code: code ?? 1, output }); });
+  });
+}
+
+const CODEX_BIN = await detectCodexBinary();
+const codexVersionResult = await capture(CODEX_BIN, ["--version"]);
+const CODEX_VERSION = codexVersionResult.code === 0 ? safeVersion(codexVersionResult.output) : "";
+
+function safeVersion(value) { return String(value || "").replace(/[\r\n]+/g, " ").trim().slice(0, 120); }
 
 function isSeparateProject(candidate) {
   if (!candidate) return false;
@@ -36,9 +81,22 @@ for (const candidate of configuredProjects) {
 }
 let initialWorkspace = "";
 try { initialWorkspace = await resolveSeparateProject(savedConfig.activeWorkspace || process.env.CODEX_OFFICE_WORKSPACE || initialProjects[0]); } catch { initialWorkspace = initialProjects[0] || ""; }
-const CODEX_BIN = process.env.CODEX_BIN || "/Applications/ChatGPT.app/Contents/Resources/codex";
-const clients = new Set();
+let persistedTasks = [];
+try {
+  const history = JSON.parse(await fsp.readFile(HISTORY_FILE, "utf8"));
+  if (Array.isArray(history.tasks)) persistedTasks = history.tasks.slice(-100).map((task) => {
+    if (task?.state !== "working" && task?.state !== "starting") return task;
+    const interruptedAt = new Date().toISOString();
+    return { ...task, state: "error", progress: 100, currentTool: null, completedAt: interruptedAt, updatedAt: interruptedAt, chat: [...(task.chat || []), { id: `restart-${Date.now()}-${Math.random().toString(16).slice(2)}`, time: interruptedAt, from: "system", text: "Bridgeが停止したため、このタスクは中断されました。" }], events: [...(task.events || []), { id: `restart-event-${Date.now()}-${Math.random().toString(16).slice(2)}`, time: interruptedAt, kind: "task", label: "Bridge停止で中断", detail: "", status: "error" }] };
+  });
+} catch {}
+const clients = new Map();
 const runningChildren = new Map();
+let pairingCode = String(crypto.randomInt(0, 1_000_000)).padStart(6, "0");
+let pairingExpiresAt = Date.now() + PAIRING_TTL_MS;
+let pairingAttempts = 0;
+const bridgeSessions = new Map();
+let historyWriteTimer = null;
 let sessionFile = null;
 let sessionOffset = 0;
 let workspace = initialWorkspace;
@@ -50,7 +108,7 @@ const state = {
   workspace,
   sandbox: { enabled: true, mode: "workspace-write", isolatedProjectOnly: true, systemProtected: true },
   projects: projectPaths.map((projectPath) => ({ id: projectPath, name: path.basename(projectPath), path: projectPath, state: "idle", progress: 0, currentTool: null, taskPrompt: "", changedFiles: 0, startedAt: null, completedAt: null })),
-  tasks: [],
+  tasks: persistedTasks,
   session: null,
   taskState: "idle",
   turnId: null,
@@ -65,6 +123,7 @@ const state = {
   events: [],
   source: { path: sourcePath, lines: [] },
   agents: [{ id: "codex", name: "Codex", role: "coding agent", state: "idle", tool: null }],
+  bridge: { paired: false, codexFound: Boolean(CODEX_BIN && CODEX_VERSION), codexPath: CODEX_BIN || null, codexVersion: CODEX_VERSION || null, historyPersistent: true },
 };
 
 function safeText(value, max = 180) {
@@ -218,9 +277,22 @@ async function pollSession() {
 }
 
 function snapshot() { return JSON.stringify(state); }
+async function persistHistory() {
+  const directory = path.dirname(HISTORY_FILE);
+  const temporary = `${HISTORY_FILE}.${process.pid}.tmp`;
+  await fsp.mkdir(directory, { recursive: true, mode: 0o700 });
+  await fsp.writeFile(temporary, `${JSON.stringify({ version: 1, savedAt: new Date().toISOString(), tasks: state.tasks.slice(-100) }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  await fsp.rename(temporary, HISTORY_FILE);
+  await fsp.chmod(HISTORY_FILE, 0o600).catch(() => {});
+}
+
+function scheduleHistoryPersist() {
+  if (historyWriteTimer) clearTimeout(historyWriteTimer);
+  historyWriteTimer = setTimeout(() => { historyWriteTimer = null; void persistHistory().catch((error) => console.error(`履歴を保存できません: ${error.message}`)); }, 80);
+}
 function broadcast() {
   const data = `data: ${snapshot()}\n\n`;
-  for (const client of clients) { try { client.write(data); } catch { clients.delete(client); } }
+  for (const client of clients.keys()) { try { client.write(data); } catch { clients.delete(client); } }
 }
 
 function taskEvent(task, kind, label, detail = "", status = "info") {
@@ -258,6 +330,7 @@ function syncActiveTaskView() {
 function updateParallelTask(task) {
   task.updatedAt = new Date().toISOString();
   if (task.workspace === workspace) syncActiveTaskView(); else syncProjectSummaries();
+  scheduleHistoryPersist();
   broadcast();
 }
 
@@ -287,6 +360,7 @@ function consumeTaskRecord(record, task) {
 
 function runTask(prompt, attachmentPaths = [], targetWorkspace = workspace) {
   if (!targetWorkspace) throw new Error("先にOfficeシステムとは別のプロジェクトフォルダーを選択してください");
+  if (!CODEX_BIN || !CODEX_VERSION) throw new Error("Codexを検出できません。ChatGPTアプリまたはCodex CLIをインストールしてください");
   if (!isSeparateProject(targetWorkspace)) throw new Error("保護対象のOfficeシステムではタスクを実行できません");
   if ([...runningChildren.values()].some((entry) => entry.task.workspace === targetWorkspace)) throw new Error("このプロジェクトでは別のタスクが実行中です。別プロジェクトは同時実行できます");
   const projectName = path.basename(targetWorkspace);
@@ -298,7 +372,7 @@ function runTask(prompt, attachmentPaths = [], targetWorkspace = workspace) {
   if (attachmentPaths.length) taskEvent(task, "attachment", "添付ファイル受領", `${attachmentPaths.length} files`, "success");
   const runningHistory = state.tasks.filter((item) => item.state === "working" || item.state === "starting");
   const completedHistory = state.tasks.filter((item) => item.state !== "working" && item.state !== "starting").slice(-24);
-  state.tasks = [...completedHistory, ...runningHistory, task]; syncProjectSummaries(); if (task.workspace === workspace) syncActiveTaskView(); broadcast();
+  state.tasks = [...completedHistory, ...runningHistory, task]; syncProjectSummaries(); if (task.workspace === workspace) syncActiveTaskView(); scheduleHistoryPersist(); broadcast();
   const attachmentNote = attachmentPaths.length ? `\n\n次の添付ファイルが外部プロジェクト内に保存されています。内容を確認してタスクに利用してください。\n${attachmentPaths.map((file) => `- ${file}`).join("\n")}` : "";
   const args = ["exec", "--json", "--color", "never", "--sandbox", "workspace-write", "--skip-git-repo-check", "-C", targetWorkspace, `${prompt}${attachmentNote}`];
   const child = spawn(CODEX_BIN, args, { cwd: targetWorkspace, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
@@ -475,25 +549,103 @@ async function selectWorkspace(data) {
   return switchWorkspace(created);
 }
 
-function cors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+function rotatePairingCode() {
+  pairingCode = String(crypto.randomInt(0, 1_000_000)).padStart(6, "0");
+  pairingExpiresAt = Date.now() + PAIRING_TTL_MS;
+  pairingAttempts = 0;
+  console.log(`Codex Office pairing code: ${pairingCode} (10分以内に入力)`);
+}
+
+function ensurePairingCode() {
+  if (!pairingCode && bridgeSessions.size) return;
+  if (!pairingCode || Date.now() >= pairingExpiresAt) rotatePairingCode();
+}
+
+function safeEqual(left, right) {
+  const leftBuffer = Buffer.from(String(left || "")); const rightBuffer = Buffer.from(String(right || ""));
+  return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function requestToken(req) {
+  const authorization = String(req.headers.authorization || "");
+  return authorization.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
+}
+
+function matchingSessionToken(token) { return token ? [...bridgeSessions.keys()].find((candidate) => safeEqual(candidate, token)) || "" : ""; }
+function isAuthorized(req) { return Boolean(matchingSessionToken(requestToken(req))); }
+
+function applyCors(req, res) {
+  const origin = String(req.headers.origin || "");
+  if (origin && !allowedOrigins.has(origin)) return false;
+  if (origin) { res.setHeader("Access-Control-Allow-Origin", origin); res.setHeader("Vary", "Origin"); }
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
   res.setHeader("Access-Control-Allow-Private-Network", "true");
+  return true;
+}
+
+async function confirmTaskExecution(prompt, targetWorkspace, attachmentCount) {
+  if (process.env.CODEX_OFFICE_CONFIRMATION === "off") return true;
+  if (process.platform !== "darwin") throw new Error("このOSのローカル実行確認にはまだ対応していません");
+  const script = `on run argv\nset projectName to item 1 of argv\nset taskPrompt to item 2 of argv\nset attachmentInfo to item 3 of argv\ntry\nset answer to display dialog "プロジェクト: " & projectName & return & "依頼: " & taskPrompt & return & attachmentInfo buttons {"拒否", "実行を許可"} default button "実行を許可" cancel button "拒否" with title "Codex Office 実行確認" with icon caution giving up after 300\nreturn button returned of answer\non error\nreturn "拒否"\nend try\nend run`;
+  const result = await capture("/usr/bin/osascript", ["-e", script, path.basename(targetWorkspace), safeText(prompt, 500), attachmentCount ? `添付: ${attachmentCount}件` : "添付: なし"], 305_000);
+  return result.code === 0 && /実行を許可/.test(result.output);
+}
+
+async function codexLoginSummary() {
+  if (!CODEX_BIN || !CODEX_VERSION) return { found: false, path: null, version: null, authenticated: false, method: null };
+  const result = await capture(CODEX_BIN, ["login", "status"]);
+  const text = safeText(result.output, 300);
+  const method = /ChatGPT/i.test(text) ? "chatgpt" : /API/i.test(text) ? "api" : null;
+  return { found: true, path: CODEX_BIN, version: CODEX_VERSION, authenticated: result.code === 0, method };
 }
 
 const server = http.createServer(async (req, res) => {
-  cors(res);
+  if (!applyCors(req, res)) { res.writeHead(403, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "このサイトからのBridge接続は許可されていません" })); return; }
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
   const url = new URL(req.url || "/", `http://${req.headers.host}`);
   if (url.pathname === "/" && req.method === "GET") {
+    ensurePairingCode();
+    const pairDisplay = bridgeSessions.size ? "接続済み（接続解除またはBridge再起動で新しいコードを発行）" : pairingCode;
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
-    res.end(`<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Codex Office Bridge</title><style>html{color-scheme:dark;font:15px system-ui;background:#0d121b;color:#dbe6ef}body{max-width:720px;margin:12vh auto;padding:24px}.card{border:1px solid #39485a;background:#151d29;padding:28px;box-shadow:0 12px 45px #0008}.live{color:#67dfa8}code{display:block;margin-top:12px;padding:12px;background:#090d13;overflow-wrap:anywhere}</style><body><main class="card"><h1><span class="live">●</span> Codex Office Bridge</h1><p>Bridge は正常に稼働しています。Office本体は書き込み対象から保護されています。</p><code>${(state.workspace || "外部プロジェクト未選択").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" })[character])}</code><p>状態: ${state.taskState} · sandbox: workspace-write</p></main></body></html>`);
+    res.end(`<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Codex Office Bridge</title><style>html{color-scheme:dark;font:15px system-ui;background:#0d121b;color:#dbe6ef}body{max-width:720px;margin:10vh auto;padding:24px}.card{border:1px solid #39485a;background:#151d29;padding:28px;box-shadow:0 12px 45px #0008}.live{color:#67dfa8}code{display:block;margin-top:12px;padding:12px;background:#090d13;overflow-wrap:anywhere}.pair{font:700 28px ui-monospace;color:#f1ca6c;letter-spacing:.18em}</style><body><main class="card"><h1><span class="live">●</span> Codex Office Bridge</h1><p>Bridge はローカルPC上で安全に待機しています。</p><p>ペアリングコード</p><code class="pair">${pairDisplay}</code><p>Codex: ${CODEX_VERSION || "未検出"}</p><code>${(state.workspace || "外部プロジェクト未選択").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" })[character])}</code><p>履歴: ${HISTORY_FILE.replace(/[&<>"']/g, "")}</p></main></body></html>`);
     return;
+  }
+  if (url.pathname === "/pair/status" && req.method === "GET") {
+    ensurePairingCode();
+    res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+    res.end(JSON.stringify({ pairingRequired: true, paired: bridgeSessions.size > 0, codeAvailable: Boolean(pairingCode), expiresAt: pairingCode ? new Date(pairingExpiresAt).toISOString() : null, codexFound: Boolean(CODEX_BIN && CODEX_VERSION), codexVersion: CODEX_VERSION || null }));
+    return;
+  }
+  if (url.pathname === "/pair" && req.method === "POST") {
+    try {
+      ensurePairingCode();
+      if (!pairingCode) throw new Error("Bridgeはすでに別のタブと接続済みです");
+      if (pairingAttempts >= MAX_PAIRING_ATTEMPTS) { res.writeHead(429, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "入力回数の上限に達しました。Bridgeを再起動してください" })); return; }
+      const data = await readBody(req); const supplied = String(data.code || "").replace(/\D/g, "");
+      if (!safeEqual(supplied, pairingCode)) { pairingAttempts += 1; res.writeHead(401, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "ペアリングコードが正しくありません", remaining: Math.max(0, MAX_PAIRING_ATTEMPTS - pairingAttempts) })); return; }
+      const token = crypto.randomBytes(32).toString("base64url"); bridgeSessions.set(token, Date.now()); pairingCode = ""; pairingExpiresAt = 0; state.bridge.paired = true;
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" }); res.end(JSON.stringify({ paired: true, token, codex: await codexLoginSummary() }));
+    } catch (error) { res.writeHead(409, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: error.message || "ペアリングできませんでした" })); }
+    return;
+  }
+  if (!isAuthorized(req)) { res.writeHead(401, { "Content-Type": "application/json", "Cache-Control": "no-store" }); res.end(JSON.stringify({ error: "Bridgeとのペアリングが必要です", code: "PAIRING_REQUIRED" })); return; }
+  const authenticatedToken = matchingSessionToken(requestToken(req)); bridgeSessions.set(authenticatedToken, Date.now());
+  if (url.pathname === "/session/heartbeat" && req.method === "POST") { res.writeHead(204); res.end(); return; }
+  if (url.pathname === "/unpair" && req.method === "POST") {
+    bridgeSessions.delete(authenticatedToken); state.bridge.paired = bridgeSessions.size > 0;
+    for (const [client, clientToken] of clients) if (safeEqual(clientToken, authenticatedToken)) { client.end(); clients.delete(client); }
+    if (!bridgeSessions.size) rotatePairingCode();
+    res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ paired: false })); return;
+  }
+  if (url.pathname === "/codex/status" && req.method === "GET") { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(await codexLoginSummary())); return; }
+  if (url.pathname === "/history" && req.method === "DELETE") {
+    state.tasks = []; syncActiveTaskView(); await persistHistory(); broadcast();
+    res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ cleared: true })); return;
   }
   if (url.pathname === "/events" && req.method === "GET") {
     res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
-    res.write(`data: ${snapshot()}\n\n`); clients.add(res); req.on("close", () => clients.delete(res)); return;
+    res.write(`data: ${snapshot()}\n\n`); clients.set(res, requestToken(req)); req.on("close", () => clients.delete(res)); return;
   }
   if (url.pathname === "/snapshot" && req.method === "GET") { res.writeHead(200, { "Content-Type": "application/json" }); res.end(snapshot()); return; }
   if (url.pathname === "/attachments" && req.method === "POST") {
@@ -536,6 +688,8 @@ const server = http.createServer(async (req, res) => {
       const data = await readBody(req); const targetWorkspace = await registeredWorkspace(data.workspace || workspace); const attachmentPaths = await validateAttachmentPaths(data.attachmentPaths, targetWorkspace);
       const prompt = data.prompt?.trim() || (attachmentPaths.length ? "添付ファイルを確認してください。" : "");
       if (!prompt) throw new Error("prompt is required");
+      const approved = await confirmTaskExecution(prompt, targetWorkspace, attachmentPaths.length);
+      if (!approved) { res.writeHead(403, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "ローカル確認でタスクが拒否されました" })); return; }
       const task = runTask(prompt, attachmentPaths, targetWorkspace); res.writeHead(202, { "Content-Type": "application/json" }); res.end(JSON.stringify({ accepted: true, taskId: task.id, project: targetWorkspace, attachments: attachmentPaths }));
     } catch (error) { res.writeHead(409, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: error.message })); }
     return;
@@ -545,6 +699,32 @@ const server = http.createServer(async (req, res) => {
 
 if (workspace) { sourcePath = await defaultSourceFor(workspace); state.source.path = sourcePath; }
 await refreshSource();
+syncActiveTaskView();
 const latest = await findLatestSession(); if (latest) { sessionFile = latest.full; sessionOffset = latest.size; state.session = path.basename(sessionFile); }
-server.listen(PORT, "127.0.0.1", () => console.log(`Codex Office bridge: http://127.0.0.1:${PORT} (${workspace || "external project not selected"})`));
+server.listen(PORT, "127.0.0.1", () => {
+  console.log(`Codex Office bridge: http://127.0.0.1:${PORT} (${workspace || "external project not selected"})`);
+  console.log(`Codex: ${CODEX_VERSION || "未検出"}${CODEX_BIN ? ` · ${CODEX_BIN}` : ""}`);
+  console.log(`Codex Office pairing code: ${pairingCode} (10分以内に入力)`);
+  console.log(`チャット履歴: ${HISTORY_FILE}`);
+});
 setInterval(() => void pollSession(), 700);
+setInterval(() => {
+  const cutoff = Date.now() - SESSION_IDLE_MS; const expired = [];
+  for (const [token, lastSeen] of bridgeSessions) if (lastSeen < cutoff) { bridgeSessions.delete(token); expired.push(token); }
+  if (!expired.length) return;
+  for (const [client, clientToken] of clients) if (expired.some((token) => safeEqual(token, clientToken))) { client.end(); clients.delete(client); }
+  state.bridge.paired = bridgeSessions.size > 0;
+  if (!bridgeSessions.size) rotatePairingCode();
+}, 30_000).unref();
+
+let shuttingDown = false;
+async function shutdown() {
+  if (shuttingDown) return; shuttingDown = true;
+  if (historyWriteTimer) clearTimeout(historyWriteTimer);
+  await persistHistory().catch(() => {});
+  for (const { child } of runningChildren.values()) child.kill("SIGTERM");
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 1_000).unref();
+}
+process.on("SIGINT", () => void shutdown());
+process.on("SIGTERM", () => void shutdown());

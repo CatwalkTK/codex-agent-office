@@ -37,12 +37,13 @@ test("keeps the Tetris game on its own route", async () => {
 });
 
 test("ships the office as the primary product", async () => {
-  const [page, layout, office, game, workspacePicker, css, bridge] = await Promise.all([
+  const [page, layout, office, game, workspacePicker, chatMarkdown, css, bridge] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/OfficeDashboard.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/TetrisGame.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/WorkspacePicker.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/ChatMarkdown.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
     readFile(new URL("../local-bridge.mjs", import.meta.url), "utf8"),
   ]);
@@ -63,6 +64,13 @@ test("ships the office as the primary product", async () => {
   assert.match(office, /selectedTaskId/);
   assert.match(office, /data-task-id/);
   assert.match(office, /CLICK TO SWITCH CHAT/);
+  assert.match(office, /pairBridge/);
+  assert.match(office, /codex-office-bridge-token/);
+  assert.match(office, /LOCAL BRIDGE SECURITY/);
+  assert.match(office, /<ChatMarkdown text=\{message\.text\}/);
+  assert.match(chatMarkdown, /ReactMarkdown/);
+  assert.match(chatMarkdown, /remarkGfm/);
+  assert.match(chatMarkdown, /skipHtml/);
   assert.match(workspacePicker, /複数の既存プロジェクトを一括追加/);
   assert.match(workspacePicker, /select\("multiple"\)/);
   assert.match(game, /HOLD/);
@@ -77,6 +85,8 @@ test("ships the office as the primary product", async () => {
   assert.match(css, /document-handoff/);
   assert.match(css, /Multi-project orchestration/);
   assert.match(css, /project-task-list/);
+  assert.match(css, /Markdown chat messages/);
+  assert.match(css, /\.chat-markdown h1/);
   assert.match(bridge, /isSeparateProject/);
   assert.match(bridge, /isolatedProjectOnly/);
   assert.match(bridge, /--sandbox", "workspace-write/);
@@ -89,5 +99,10 @@ test("ships the office as the primary product", async () => {
   assert.match(bridge, /mode === "multiple"/);
   assert.match(bridge, /function taskChat/);
   assert.match(bridge, /taskChat\(task, "codex"/);
+  assert.match(bridge, /DEFAULT_ALLOWED_ORIGINS/);
+  assert.match(bridge, /confirmTaskExecution/);
+  assert.match(bridge, /detectCodexBinary/);
+  assert.match(bridge, /persistHistory/);
+  assert.doesNotMatch(bridge, /Access-Control-Allow-Origin", "\*"/);
   assert.doesNotMatch(page + layout + office + game, /InvaderGame|codex-preview|_sites-preview/);
 });

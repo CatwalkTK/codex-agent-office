@@ -8,12 +8,18 @@ type Props = {
   workspace?: string;
   connected?: boolean;
   projects?: ProjectSummary[];
+  bridgeToken?: string;
   onWorkspaceChanged?: (workspace: string, projects?: ProjectSummary[]) => void;
 };
 
 type ProjectSummary = { id: string; name: string; path: string; state: string; progress: number; currentTool?: string | null };
 
-export function WorkspacePicker({ workspace: externalWorkspace, connected: externalConnected, projects: externalProjects, onWorkspaceChanged }: Props) {
+function authHeaders(token?: string, json = false) {
+  const saved = token || (typeof window !== "undefined" ? window.sessionStorage.getItem("codex-office-bridge-token") || "" : "");
+  return { ...(json ? { "Content-Type": "application/json" } : {}), ...(saved ? { Authorization: `Bearer ${saved}` } : {}) };
+}
+
+export function WorkspacePicker({ workspace: externalWorkspace, connected: externalConnected, projects: externalProjects, bridgeToken, onWorkspaceChanged }: Props) {
   const [open, setOpen] = useState(false);
   const [internalWorkspace, setInternalWorkspace] = useState(externalWorkspace || "");
   const [internalConnected, setInternalConnected] = useState(Boolean(externalConnected));
@@ -27,10 +33,10 @@ export function WorkspacePicker({ workspace: externalWorkspace, connected: exter
 
   useEffect(() => {
     if (externalWorkspace !== undefined) return;
-    fetch(`${BRIDGE}/snapshot`).then((response) => response.json()).then((data) => {
+    fetch(`${BRIDGE}/snapshot`, { headers:authHeaders(bridgeToken) }).then((response) => response.json()).then((data) => {
       setInternalWorkspace(data.workspace || ""); setInternalConnected(Boolean(data.connected)); setInternalProjects(data.projects || []);
     }).catch(() => setInternalConnected(false));
-  }, [externalWorkspace]);
+  }, [externalWorkspace, bridgeToken]);
 
   const folderLabel = useMemo(() => {
     const clean = workspace.replace(/\/$/, "");
@@ -42,7 +48,7 @@ export function WorkspacePicker({ workspace: externalWorkspace, connected: exter
     setBusy(mode); setMessage(mode === "multiple" ? "追加するプロジェクトを複数選択してください…" : mode === "existing" ? "フォルダー選択画面を開いています…" : "作成場所を選択してください…");
     try {
       const response = await fetch(`${BRIDGE}/workspace`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: authHeaders(bridgeToken, true),
         body: JSON.stringify({ mode, name: mode === "new" ? folderName.trim() : undefined }),
       });
       const result = await response.json();
@@ -60,7 +66,7 @@ export function WorkspacePicker({ workspace: externalWorkspace, connected: exter
     if (path === workspace || busy) return;
     setBusy("existing"); setMessage("プロジェクトを切り替えています…");
     try {
-      const response = await fetch(`${BRIDGE}/workspace/activate`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ path }) });
+      const response = await fetch(`${BRIDGE}/workspace/activate`, { method:"POST", headers:authHeaders(bridgeToken, true), body:JSON.stringify({ path }) });
       const result = await response.json(); if (!response.ok) throw new Error(result.error || "切り替えられませんでした");
       setInternalWorkspace(result.workspace); setInternalProjects(result.snapshot?.projects || projects); setMessage("表示プロジェクトを切り替えました"); onWorkspaceChanged?.(result.workspace, result.snapshot?.projects);
     } catch (error) { setMessage(error instanceof Error ? error.message : "切り替えエラー"); }
