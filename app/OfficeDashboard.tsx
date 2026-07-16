@@ -23,25 +23,29 @@ type Snapshot = {
 
 const BRIDGE = "http://127.0.0.1:4312";
 const emptySnapshot: Snapshot = { connected: false, workspace: "", session: null, taskState: "disconnected", currentTool: null, currentFile: null, lastAgentMessage: "", taskPrompt: "", startedAt: null, completedAt: null, changedFiles: [], events: [], source: { path: "", lines: [] }, agents: [], projects: [], tasks: [], pool:{maxAgents:10,activeAgents:0,queuedTasks:0,worktreesEnabled:true} };
-const agentPositions = [{ x: 50, y: 14 }, { x: 20, y: 15 }, { x: 80, y: 15 }, { x: 28, y: 55 }, { x: 73, y: 55 }, { x: 12, y: 43 }, { x: 35, y: 42 }, { x: 65, y: 42 }, { x: 88, y: 43 }, { x: 91, y: 58 }, { x: 9, y: 53 }, { x: 91, y: 35 }, { x: 32, y: 79 }, { x: 68, y: 79 }, { x: 42, y: 76 }, { x: 15, y: 86 }, { x: 85, y: 86 }, { x: 42, y: 38 }, { x: 58, y: 38 }, { x: 58, y: 76 }];
-const poolDeskPositions = [{ x:12,y:43 },{ x:35,y:42 },{ x:65,y:42 },{ x:88,y:43 },{ x:91,y:58 },{ x:8,y:53 },{ x:91,y:35 },{ x:31,y:78 },{ x:69,y:78 },{ x:42,y:75 },{ x:15,y:85 },{ x:85,y:85 },{ x:42,y:37 },{ x:58,y:37 },{ x:58,y:75 }];
+const departmentDeskPositions = [
+  { x:13,y:19,room:"社長室" },{ x:37,y:19,room:"企画室" },{ x:63,y:19,room:"開発室" },{ x:87,y:19,room:"品質室" },
+  { x:13,y:45,room:"調査室" },{ x:87,y:45,room:"運用室" },
+  { x:13,y:68,room:"設計室" },{ x:34,y:68,room:"制作室" },{ x:66,y:68,room:"監査室" },{ x:87,y:68,room:"支援室" },
+];
+const agentPositions = departmentDeskPositions.map((desk)=>({x:desk.x,y:desk.y-3}));
 const officeRoster = [
   { id:"codex", name:"Codex", role:"統括・オーケストレーター" }, { id:"scout", name:"Scout", role:"検索・調査" }, { id:"mika", name:"Mika", role:"編集・実装" }, { id:"reviewer", name:"Reviewer", role:"コードレビュー" }, { id:"sora", name:"Sora", role:"テスト・品質保証" },
   { id:"architect", name:"Architect", role:"設計・分解" }, { id:"analyst", name:"Analyst", role:"分析・要件整理" }, { id:"builder", name:"Builder", role:"並列実装" }, { id:"auditor", name:"Auditor", role:"監査・検証" }, { id:"ops", name:"Ops", role:"実行・運用" },
   { id:"researcher", name:"Researcher", role:"深掘り調査" }, { id:"designer", name:"Designer", role:"UI・体験設計" }, { id:"writer", name:"Writer", role:"文書・仕様" }, { id:"tester2", name:"Tester II", role:"並列テスト" }, { id:"reviewer2", name:"Reviewer II", role:"追加レビュー" }, { id:"security", name:"Security", role:"セキュリティ" }, { id:"data", name:"Data", role:"データ処理" }, { id:"release", name:"Release", role:"リリース管理" }, { id:"support", name:"Support", role:"調整・支援" }, { id:"runner", name:"Runner", role:"補助実行" },
 ];
 const obstacles = [
-  { x1: 39, x2: 61, y1: 17, y2: 32 }, { x1: 10, x2: 30, y1: 18, y2: 36 }, { x1: 70, x2: 89, y1: 18, y2: 36 },
-  { x1: 17, x2: 39, y1: 59, y2: 72 }, { x1: 62, x2: 84, y1: 59, y2: 72 }, { x1: 7, x2: 25, y1: 67, y2: 82 }, { x1: 89, x2: 97, y1: 58, y2: 82 },
+  ...departmentDeskPositions.map((desk)=>({x1:desk.x-9,x2:desk.x+9,y1:desk.y-6,y2:desk.y+8})),
+  {x1:35,x2:65,y1:37,y2:59},
 ];
 function blocked(x: number, y: number) { return obstacles.some((o) => x > o.x1 && x < o.x2 && y > o.y1 && y < o.y2); }
 
 function RuntimeCharacter({ agent, index }: { agent: AgentState; index: number }) {
   const position = agentPositions[index] || { x: 50 + (index % 3) * 12, y: 45 + Math.floor(index / 3) * 20 };
   const spriteIndex = (index % 5) + 1;
-  const style = { left:`${position.x}%`, top:`${position.y}%`, "--agent-scale":index>=5?".72":"1", "--walk-x":`${index%2 ? 18 : -18}px`, "--walk-y":`${index%3 ? 10 : -9}px`, "--walk-delay":`${-(index*1.17)}s`, "--walk-duration":`${7+(index%5)*1.2}s` } as React.CSSProperties;
+  const style = { left:`${position.x}%`, top:`${position.y}%`, "--agent-scale":".78", "--walk-x":`${index%2 ? 15 : -15}px`, "--walk-y":`${index%3 ? 8 : -7}px`, "--walk-delay":`${-(index*1.17)}s`, "--walk-duration":`${7+(index%5)*1.2}s` } as React.CSSProperties;
   const walking = agent.state === "idle" && index >= 5;
-  return <div className={`npc image-npc runtime-npc state-${agent.state} ${index>=5?"pool-agent":""} ${walking?"ambient-walk":""}`} style={style}>
+  return <div className={`npc image-npc runtime-npc pool-agent state-${agent.state} ${walking?"ambient-walk":""}`} style={style}>
     {index === 0 && <div className="manager-badge">CODEX</div>}
     <div className="npc-art" style={{ backgroundPosition: `${spriteIndex * 20}% 50%` }} />
     <div className="npc-tag"><b>{agent.name}</b><span>{agent.projectName || agent.tool || (walking?"巡回中":agent.state)}</span></div>
@@ -81,10 +85,15 @@ export function OfficeDashboard() {
   const [now, setNow] = useState(Date.now());
   const inputRef = useRef<HTMLInputElement>(null);
   const mapRef = useRef<HTMLDivElement>(null);
-  const nearCodex = Math.hypot(player.x - 50, player.y - 37) < 10;
+  const bridgeTokenRef = useRef("");
+  const bridgeChannelRef = useRef<BroadcastChannel | null>(null);
+  const bridgeRequestRef = useRef("");
+  const nearCodex = Math.hypot(player.x - 13, player.y - 32) < 10;
 
   const clearPairing = useCallback(() => {
-    window.sessionStorage.removeItem("codex-office-bridge-token"); setBridgeToken(""); setBridgeConnected(false); setPairingRequired(true);
+    const revokedToken = bridgeTokenRef.current;
+    window.sessionStorage.removeItem("codex-office-bridge-token"); bridgeTokenRef.current = ""; setBridgeToken(""); setBridgeConnected(false); setPairingRequired(true);
+    if (revokedToken) bridgeChannelRef.current?.postMessage({ type:"session-revoked", token:revokedToken });
   }, []);
 
   const bridgeFetch = useCallback((pathname: string, init: RequestInit = {}) => {
@@ -94,7 +103,24 @@ export function OfficeDashboard() {
 
   useEffect(() => {
     const saved = window.sessionStorage.getItem("codex-office-bridge-token") || "";
-    if (saved) setBridgeToken(saved); else setPairingRequired(true);
+    const channel = typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel("codex-office-bridge-session-v1");
+    bridgeChannelRef.current = channel;
+    const requestId = window.crypto.randomUUID(); bridgeRequestRef.current = requestId;
+    const accept = (token: string) => {
+      if (!/^[A-Za-z0-9_-]{40,64}$/.test(token)) return;
+      bridgeTokenRef.current = token; window.sessionStorage.setItem("codex-office-bridge-token", token); setBridgeToken(token); setPairingRequired(false); setPairingMessage("既存のOfficeタブからBridge接続を引き継ぎました。");
+    };
+    if (channel) {
+      channel.onmessage = (event) => {
+        const data = event.data || {};
+        if (data.type === "session-request" && bridgeTokenRef.current) channel.postMessage({ type:"session-share", requestId:data.requestId, token:bridgeTokenRef.current });
+        else if (data.type === "session-share" && data.requestId === bridgeRequestRef.current && !bridgeTokenRef.current) accept(String(data.token || ""));
+        else if (data.type === "session-revoked" && data.token === bridgeTokenRef.current) { window.sessionStorage.removeItem("codex-office-bridge-token"); bridgeTokenRef.current=""; setBridgeToken(""); setBridgeConnected(false); setPairingRequired(true); }
+      };
+    }
+    if (saved) { bridgeTokenRef.current = saved; setBridgeToken(saved); }
+    else { setPairingRequired(true); channel?.postMessage({ type:"session-request", requestId }); }
+    return () => { channel?.close(); if (bridgeChannelRef.current === channel) bridgeChannelRef.current = null; };
   }, []);
 
   useEffect(() => {
@@ -129,7 +155,7 @@ export function OfficeDashboard() {
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(timer); }, []);
   useEffect(() => {
     const open = window.setTimeout(() => setDoorOpen(true), 350);
-    const walk = window.setTimeout(() => setPlayer({ x: 50, y: 82, facing: "up" }), 850);
+    const walk = window.setTimeout(() => setPlayer({ x: 50, y: 77, facing: "up" }), 850);
     const done = window.setTimeout(() => { setEntering(false); setDoorOpen(false); mapRef.current?.focus(); }, 2000);
     return () => { clearTimeout(open); clearTimeout(walk); clearTimeout(done); };
   }, []);
@@ -162,7 +188,8 @@ export function OfficeDashboard() {
       sora: withActiveFloor("sora", count(/test|build|vitest|playwright|テスト|ビルド/)),
     };
   }, [snapshot.tasks, runningTasks.length, displayAgents]);
-  const activeHandoffs = displayAgents.slice(1).filter((agent) => agent.state === "working").map((agent) => agent.id);
+  const deskLevels = [deskWorkload.codex,deskWorkload.scout,deskWorkload.mika,deskWorkload.reviewer,deskWorkload.sora,...displayAgents.slice(5,10).map((agent)=>agent.state==="working"?3:0)];
+  const deskTones = ["gold","blue","green","purple","red","blue","green","purple","red","gold"];
 
   const move = useCallback((dx: number, dy: number, facing: Facing) => {
     if (chatOpen) return;
@@ -176,10 +203,16 @@ export function OfficeDashboard() {
     try {
       const response = await fetch(`${BRIDGE}/pair`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ code:pairingCode }) });
       const result = await response.json(); if (!response.ok) throw new Error(result.error || "ペアリングできませんでした");
-      window.sessionStorage.setItem("codex-office-bridge-token", result.token); setBridgeToken(result.token); setPairingRequired(false); setPairingCode("");
+      bridgeTokenRef.current = result.token; window.sessionStorage.setItem("codex-office-bridge-token", result.token); setBridgeToken(result.token); setPairingRequired(false); setPairingCode("");
       if (!result.codex?.found) setPairingMessage("Codexを検出できません。ChatGPTアプリまたはCodex CLIを確認してください。");
     } catch (error) { setPairingMessage(error instanceof Error ? error.message : "Bridgeへ接続できません"); }
     finally { setPairingBusy(false); }
+  }
+
+  function requestSharedSession() {
+    const requestId = window.crypto.randomUUID(); bridgeRequestRef.current = requestId;
+    bridgeChannelRef.current?.postMessage({ type:"session-request", requestId });
+    setPairingMessage("接続済みのOfficeタブを探しています。見つからない場合はBridge画面の新しいコードを入力してください。");
   }
 
   async function unpairBridge() {
@@ -280,17 +313,15 @@ export function OfficeDashboard() {
       <div className="game-status"><div><small>RUNTIME</small><b>{statusLabel}</b><span>{snapshot.currentTool || "toolなし"}</span></div><div><small>ISOLATED PROJECT</small><b>{activeProject?.name || (snapshot.workspace ? "外部プロジェクト" : "右上から外部プロジェクトを選択してください")}</b></div><div className="pool-badge"><small>AGENT POOL</small><b>{snapshot.pool?.activeAgents||0}/{snapshot.pool?.maxAgents||displayAgents.length}</b><span>QUEUE {snapshot.pool?.queuedTasks||0}</span></div><div className={bridgeConnected && snapshot.workspace ? "online" : "online disconnected"}><i />{!bridgeConnected ? "BRIDGE OFFLINE" : snapshot.workspace ? "SYSTEM PROTECTED · SANDBOX ON" : "SELECT EXTERNAL PROJECT"}</div></div>
       <div className="office-map" ref={mapRef} tabIndex={0} aria-label="オフィス。WASDまたは矢印キーで移動" onPointerDown={() => mapRef.current?.focus()}>
         <div className="windows"><i /><i /><i /><i /></div>
-        <div className="zone-label executive">CODEX DESK</div><div className="zone-label product">WORKSPACE</div><div className="zone-label qa">CHANGES</div>
-        <div className="executive-desk"><div className="wide-monitor"><i /></div><i className="laptop" /><i className="coffee" /><span>CODEX</span><DeskDocuments level={deskWorkload.codex} label="INBOX" tone="gold" active={displayAgents[0]?.state === "working"} /></div>
-        <div className="workstation ws-left"><div className="monitor"><i /></div><div className="chair" /><span className="desk-name">SCOUT</span><DeskDocuments level={deskWorkload.scout} label="BRIEF" tone="blue" active={displayAgents[1]?.state === "working"} /></div><div className="workstation ws-right"><div className="monitor"><i /></div><div className="chair" /><span className="desk-name">MIKA</span><DeskDocuments level={deskWorkload.mika} label="PATCH" tone="green" active={displayAgents[2]?.state === "working"} /></div>
-        <div className="agent-desk desk-review"><div className="monitor"><i /></div><div className="desk-chair" /><span>REVIEWER</span><DeskDocuments level={deskWorkload.reviewer} label="REVIEW" tone="purple" active={displayAgents[3]?.state === "working"} /></div><div className="agent-desk desk-test"><div className="monitor"><i /></div><div className="desk-chair" /><span>SORA</span><DeskDocuments level={deskWorkload.sora} label="TEST" tone="red" active={displayAgents[4]?.state === "working"} /></div>
-        {displayAgents.slice(5).map((agent,index)=>{const position=poolDeskPositions[index]||{x:50,y:50};return <div className={`pool-desk ${agent.state==="working"?"active":""}`} style={{left:`${position.x}%`,top:`${position.y}%`}} key={`desk-${agent.id}`}><i className="pool-monitor"/><b>{agent.name}</b><span>{agent.state==="working"?agent.projectName||"TASK":"HOT DESK"}</span><em>{agent.state==="working"?"▤ ▤ ▤":"▤"}</em></div>})}
-        {(["scout","mika","reviewer","sora"] as const).map((id)=><div key={id} className={`handoff-route route-${id} ${activeHandoffs.includes(id)?"active":""}`} aria-hidden="true"><i /><b>▤</b></div>)}
-        <div className="visual-work-legend"><span><i className="legend-paper" />資料量＝実イベント数</span><span><i className="legend-route" />書類移動＝担当稼働中</span></div>
-        <div className="office-sofa"><i /><i /><span /></div><div className="office-plant plant-left"><i /><b /></div><div className="office-plant plant-right"><i /><b /></div><div className="server-rack"><i /><i /><i /><b /></div>
+        <div className="office-floor-title">CODEX & CO. · OPEN OFFICE FLOOR</div>
+        {displayAgents.slice(0,10).map((agent,index)=>{const position=departmentDeskPositions[index];return <div className={`department-desk ${index===0?"boss":""} ${agent.state==="working"?"active":""}`} style={{left:`${position.x}%`,top:`${position.y}%`}} key={`desk-${agent.id}`}><span className="room-sign">{position.room}</span><div className="department-monitor"><i /></div><b>{agent.name}</b><small>{agent.state==="working"?agent.projectName||"TASK IN PROGRESS":agent.role}</small><DeskDocuments level={deskLevels[index]||0} label={index===0?"INBOX":"WORK"} tone={deskTones[index]} active={agent.state==="working"} /></div>})}
+        <div className="meeting-zone"><span>PROJECT TABLE</span><div className="meeting-table"><i/><i/><i/><i/><i/><i/></div><b>共有会議・オーケストレーション</b></div>
+        {displayAgents.length>10&&<div className="remote-floor">2F ANNEX <b>+{displayAgents.length-10}</b><span>リモート席で稼働</span></div>}
+        <div className="visual-work-legend"><span><i className="legend-paper" />資料量＝実イベント数</span><span><i className="legend-route" />黄色枠＝担当稼働中</span></div>
+        <div className="office-plant plant-left"><i /><b /></div><div className="office-plant plant-right"><i /><b /></div><div className="server-rack"><i /><i /><i /><b /></div>
         <div className={`auto-door ${doorOpen ? "open" : ""}`}><div className="door-sign">AUTO · ENTRANCE</div><i className="door-left" /><i className="door-right" /><b className="door-sensor" /></div>
-        <div className="move-help"><div><span>YOU</span><b>青いラベルがあなたです</b><small>WASD／矢印キー、または右下ボタンで移動</small></div><button onClick={()=>setPlayer({x:50,y:82,facing:"up"})}>入口へ戻る</button></div>
-        {displayAgents.map((agent,index)=><RuntimeCharacter agent={agent} index={index} key={agent.id} />)}
+        <div className="move-help"><div><span>YOU</span><b>青いラベルがあなたです</b><small>WASD／矢印キー、または右下ボタンで移動</small></div><button onClick={()=>setPlayer({x:50,y:77,facing:"up"})}>入口へ戻る</button></div>
+        {displayAgents.slice(0,10).map((agent,index)=><RuntimeCharacter agent={agent} index={index} key={agent.id} />)}
         <div className={`business-player image-player face-${player.facing} ${entering ? "entering" : ""}`} style={{left:`${player.x}%`,top:`${player.y}%`}}><div className="player-arrow">YOU ▼</div><div className="player-art" /></div>
         {nearCodex && !chatOpen && <button className="talk-prompt" onClick={talk}><kbd>ENTER</kbd><span>Codexへ実タスクを依頼</span></button>}
         <div className="movement-pad"><button onClick={()=>move(0,-2.6,"up")}>▲</button><button onClick={()=>move(-2.2,0,"left")}>◀</button><button className={nearCodex?"can-talk":""} onClick={talk}>A</button><button onClick={()=>move(2.2,0,"right")}>▶</button><button onClick={()=>move(0,2.6,"down")}>▼</button></div>
@@ -307,7 +338,7 @@ export function OfficeDashboard() {
       <section className="agent-now"><div className="agent-now-head"><span>REAL CODEX AGENT POOL</span><b>{displayAgents.filter(agent=>agent.state==="working"||agent.state==="starting").length}/{displayAgents.length} active</b></div>{displayAgents.map((agent)=><div key={agent.id}><i className={`agent-state-dot ${agent.state}`} /><span><b>{agent.name}{agent.projectName?` · ${agent.projectName}`:""}</b><small>{agent.tool||agent.role}</small></span><em className={agent.state==="working"||agent.state==="starting"?"working":""}>{agent.state}</em></div>)}</section>
     </aside>
 
-    {pairingRequired&&<div className="pairing-backdrop"><section className="pairing-dialog" role="dialog" aria-modal="true" aria-labelledby="pairing-title"><div className="pairing-lock">⌁</div><small>LOCAL BRIDGE SECURITY</small><h2 id="pairing-title">このPCのBridgeと接続</h2><p>Bridgeを起動したターミナル、または <a href="http://127.0.0.1:4312/" target="_blank" rel="noreferrer">ローカルBridge画面</a> に表示される6桁コードを入力してください。入力後、Mac側の確認画面でも接続を許可してください。</p><form onSubmit={pairBridge}><label htmlFor="pairing-code">PAIRING CODE</label><input id="pairing-code" value={pairingCode} onChange={(event)=>setPairingCode(event.target.value.replace(/\D/g,"").slice(0,6))} inputMode="numeric" autoComplete="one-time-code" placeholder="000000" autoFocus/><button type="submit" disabled={pairingBusy||pairingCode.length!==6}>{pairingBusy?"接続中…":"Bridgeへ接続"}</button></form>{pairingMessage&&<div className="pairing-message">{pairingMessage}</div>}<footer><span>コード＋ローカル確認で接続</span><span>危険な操作は毎回Mac側で再確認</span></footer></section></div>}
+    {pairingRequired&&<div className="pairing-backdrop"><section className="pairing-dialog" role="dialog" aria-modal="true" aria-labelledby="pairing-title"><div className="pairing-lock">⌁</div><small>LOCAL BRIDGE SECURITY</small><h2 id="pairing-title">このPCのBridgeと接続</h2><p>Bridgeを起動したターミナル、または <a href="http://127.0.0.1:4312/" target="_blank" rel="noreferrer">ローカルBridge画面</a> に表示される6桁コードを入力してください。Bridgeが接続済みと表示されていても、新しいコードを使用できます。</p><form onSubmit={pairBridge}><label htmlFor="pairing-code">PAIRING CODE</label><input id="pairing-code" value={pairingCode} onChange={(event)=>setPairingCode(event.target.value.replace(/\D/g,"").slice(0,6))} inputMode="numeric" autoComplete="one-time-code" placeholder="000000" autoFocus/><button type="submit" disabled={pairingBusy||pairingCode.length!==6}>{pairingBusy?"接続中…":"Bridgeへ接続"}</button><button className="inherit-session" type="button" onClick={requestSharedSession}>接続済みタブから引き継ぐ</button></form>{pairingMessage&&<div className="pairing-message">{pairingMessage}</div>}<footer><span>コード＋ローカル確認で接続</span><span>危険な操作は毎回Mac側で再確認</span></footer></section></div>}
 
     {chatOpen&&<div className="chat-backdrop"><section className="boss-chat" role="dialog" aria-modal="true">
       <header><div className="chat-portrait image-portrait"/><div><small>{selectedTask?`TASK CHAT · ${selectedTask.id.slice(-6)}`:"NEW ISOLATED TASK"}</small><h2>{selectedTask?selectedTask.projectName:"Codexへ指示"}</h2><span><i className={bridgeConnected&&snapshot.workspace?"":"offline"}/>{!bridgeConnected?"ブリッジ未接続":selectedTask?`${selectedTask.state} · ${selectedTask.progress}% · ${selectedTask.currentTool||"待機"}`:snapshot.workspace?"新しいタスクを開始できます":"外部プロジェクト未選択"}</span></div><button onClick={()=>setChatOpen(false)}>×</button></header>

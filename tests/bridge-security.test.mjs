@@ -116,6 +116,18 @@ else {
   assert.ok(paired.token.length > 30);
   const headers = { Origin: allowedOrigin, Authorization: `Bearer ${paired.token}`, "Content-Type": "application/json" };
 
+  const activeBridgePage = await fetch(`${base}/`);
+  const activeBridgeHtml = await activeBridgePage.text();
+  assert.match(activeBridgeHtml, /Officeタブが接続中/);
+  assert.doesNotMatch(activeBridgeHtml, /接続解除またはBridge再起動/);
+  const additionalCode = activeBridgeHtml.match(/class="pair">(\d{6})</)?.[1];
+  assert.equal(typeof additionalCode, "string");
+  const additionalPairResponse = await fetch(`${base}/pair`, { method:"POST", headers:{ Origin:allowedOrigin,"Content-Type":"application/json" }, body:JSON.stringify({ code:additionalCode }) });
+  assert.equal(additionalPairResponse.status, 200);
+  const additionalPair = await additionalPairResponse.json();
+  assert.notEqual(additionalPair.token, paired.token);
+  const additionalHeaders = { ...headers, Authorization:`Bearer ${additionalPair.token}` };
+
   const snapshotResponse = await fetch(`${base}/snapshot`, { headers });
   assert.equal(snapshotResponse.status, 200);
   const snapshot = await snapshotResponse.json();
@@ -191,6 +203,9 @@ else {
   assert.equal(unpairResponse.status, 200);
   const afterUnpair = await fetch(`${base}/snapshot`, { headers });
   assert.equal(afterUnpair.status, 401);
+  const stillConnected = await fetch(`${base}/snapshot`, { headers:additionalHeaders });
+  assert.equal(stillConnected.status, 200);
+  await fetch(`${base}/unpair`, { method:"POST", headers:additionalHeaders });
 });
 
 test("runs same-project tasks in separate worktrees and integrates the isolated result", async (t) => {

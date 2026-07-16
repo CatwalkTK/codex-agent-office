@@ -865,7 +865,6 @@ function rotatePairingCode() {
 }
 
 function ensurePairingCode() {
-  if (!pairingCode && bridgeSessions.size) return;
   if (!pairingCode || Date.now() >= pairingExpiresAt) rotatePairingCode();
 }
 
@@ -929,11 +928,11 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://127.0.0.1:${PORT}`);
   if (url.pathname === "/" && req.method === "GET") {
     ensurePairingCode();
-    const pairDisplay = bridgeSessions.size ? "接続済み（接続解除またはBridge再起動で新しいコードを発行）" : pairingCode;
+    const sessionNotice = bridgeSessions.size ? `<p class="connected">${bridgeSessions.size}個のOfficeタブが接続中です。別のタブを接続する場合も、下のコードを使用できます。</p>` : "";
     res.setHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'");
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
     const publicProject = workspace ? `${path.basename(workspace)} · ${projectPublicId(workspace)}` : "外部プロジェクト未選択";
-    res.end(`<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Codex Office Bridge</title><style>html{color-scheme:dark;font:15px system-ui;background:#0d121b;color:#dbe6ef}body{max-width:720px;margin:10vh auto;padding:24px}.card{border:1px solid #39485a;background:#151d29;padding:28px;box-shadow:0 12px 45px #0008}.live{color:#67dfa8}code{display:block;margin-top:12px;padding:12px;background:#090d13;overflow-wrap:anywhere}.pair{font:700 28px ui-monospace;color:#f1ca6c;letter-spacing:.18em}</style><body><main class="card"><h1><span class="live">●</span> Codex Office Bridge</h1><p>Bridge はローカルPC上で安全に待機しています。</p><p>ペアリングコード</p><code class="pair">${pairDisplay}</code><p>Codex: ${CODEX_VERSION || "未検出"}</p><code>${publicProject.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" })[character])}</code><p>履歴と添付は所有者専用の保護領域へ保存されます。</p></main></body></html>`);
+    res.end(`<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Codex Office Bridge</title><style>html{color-scheme:dark;font:15px system-ui;background:#0d121b;color:#dbe6ef}body{max-width:720px;margin:10vh auto;padding:24px}.card{border:1px solid #39485a;background:#151d29;padding:28px;box-shadow:0 12px 45px #0008}.live{color:#67dfa8}.connected{padding:10px 12px;color:#8fe2b8;background:#10271f;border:1px solid #2c6a4e}code{display:block;margin-top:12px;padding:12px;background:#090d13;overflow-wrap:anywhere}.pair{font:700 28px ui-monospace;color:#f1ca6c;letter-spacing:.18em}</style><body><main class="card"><h1><span class="live">●</span> Codex Office Bridge</h1><p>Bridge はローカルPC上で安全に待機しています。</p>${sessionNotice}<p>ペアリングコード（10分間有効）</p><code class="pair">${pairingCode}</code><p>Codex: ${CODEX_VERSION || "未検出"}</p><code>${publicProject.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" })[character])}</code><p>履歴と添付は所有者専用の保護領域へ保存されます。</p></main></body></html>`);
     return;
   }
   if (url.pathname === "/pair/status" && req.method === "GET") {
@@ -945,14 +944,13 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === "/pair" && req.method === "POST") {
     try {
       ensurePairingCode();
-      if (!pairingCode) throw new Error("Bridgeはすでに別のタブと接続済みです");
       if (pairingAttempts >= MAX_PAIRING_ATTEMPTS) { res.writeHead(429, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "入力回数の上限に達しました。Bridgeを再起動してください" })); return; }
       const data = await readBody(req); const supplied = String(data.code || "").replace(/\D/g, "");
       if (!safeEqual(supplied, pairingCode)) { pairingAttempts += 1; res.writeHead(401, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "ペアリングコードが正しくありません", remaining: Math.max(0, MAX_PAIRING_ATTEMPTS - pairingAttempts) })); return; }
       const origin = String(req.headers.origin || "ローカルアプリ");
       const approved = await confirmLocalAction("Codex Office ペアリング確認", [`接続元: ${origin}`, "許可範囲: プロジェクト状態・チャット・安全なソースプレビュー", "ファイル保存・履歴削除・Codex実行は操作ごとに再確認します"], "接続を許可");
       if (!approved) { res.writeHead(403, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "ローカル確認でペアリングが拒否されました" })); return; }
-      const token = crypto.randomBytes(32).toString("base64url"); bridgeSessions.set(token, Date.now()); pairingCode = ""; pairingExpiresAt = 0; state.bridge.paired = true;
+      const token = crypto.randomBytes(32).toString("base64url"); bridgeSessions.set(token, Date.now()); rotatePairingCode(); state.bridge.paired = true;
       res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" }); res.end(JSON.stringify({ paired: true, token, codex: await codexLoginSummary() }));
     } catch (error) { sendError(res, error, "ペアリングできませんでした"); }
     return;

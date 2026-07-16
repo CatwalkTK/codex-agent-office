@@ -28,7 +28,8 @@ test("server-renders the Codex Office at the main route", async () => {
   assert.match(html, /<title>Codex Office/);
   assert.match(html, /CODEX &amp; CO\./);
   assert.match(html, /REAL RUNTIME OFFICE/);
-  assert.match(html, /WORKSPACE/);
+  assert.match(html, /OPEN OFFICE FLOOR/);
+  assert.match(html, /PROJECT TABLE/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|NIGHT RAIDERS/i);
 });
 
@@ -58,7 +59,8 @@ test("ships the office as the primary product", async () => {
   assert.match(office, /WorkspacePicker/);
   assert.match(office, /REAL DEV MONITOR/);
   assert.match(office, /DeskDocuments/);
-  assert.match(office, /handoff-route/);
+  assert.match(office, /departmentDeskPositions/);
+  assert.match(office, /meeting-zone/);
   assert.match(office, /Office本体は保護/);
   assert.match(office, /type="file"/);
   assert.match(office, /uploadId/);
@@ -72,10 +74,12 @@ test("ships the office as the primary product", async () => {
   assert.match(office, /REAL CODEX AGENT POOL/);
   assert.match(office, /ambient-walk/);
   assert.match(office, /integrateParallelTask/);
-  assert.match(office, /pool-desk/);
+  assert.match(office, /department-desk/);
   assert.match(office, /pairBridge/);
   assert.match(office, /codex-office-bridge-token/);
   assert.match(office, /LOCAL BRIDGE SECURITY/);
+  assert.match(office, /BroadcastChannel/);
+  assert.match(office, /接続済みタブから引き継ぐ/);
   assert.match(office, /<ChatMarkdown text=\{message\.text\}/);
   assert.match(chatMarkdown, /ReactMarkdown/);
   assert.match(chatMarkdown, /remarkGfm/);
@@ -94,6 +98,8 @@ test("ships the office as the primary product", async () => {
   assert.match(css, /\.office-app/);
   assert.match(css, /\.desk-documents/);
   assert.match(css, /document-handoff/);
+  assert.match(css, /department-desk/);
+  assert.match(css, /meeting-table/);
   assert.match(css, /Multi-project orchestration/);
   assert.match(css, /project-task-list/);
   assert.match(css, /Markdown chat messages/);
