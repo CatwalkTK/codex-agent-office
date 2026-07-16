@@ -69,6 +69,10 @@ test("ships the office as the primary product", async () => {
   assert.match(office, /selectedTaskId/);
   assert.match(office, /data-task-id/);
   assert.match(office, /CLICK TO SWITCH CHAT/);
+  assert.match(office, /REAL CODEX AGENT POOL/);
+  assert.match(office, /ambient-walk/);
+  assert.match(office, /integrateParallelTask/);
+  assert.match(office, /pool-desk/);
   assert.match(office, /pairBridge/);
   assert.match(office, /codex-office-bridge-token/);
   assert.match(office, /LOCAL BRIDGE SECURITY/);
@@ -78,6 +82,8 @@ test("ships the office as the primary product", async () => {
   assert.match(chatMarkdown, /skipHtml/);
   assert.match(workspacePicker, /複数の既存プロジェクトを一括追加/);
   assert.match(workspacePicker, /select\("multiple"\)/);
+  assert.match(workspacePicker, /settings\/agents/);
+  assert.match(workspacePicker, /5〜20人/);
   assert.match(game, /HOLD/);
   assert.match(game, /NEXT/);
   assert.match(game, /hardDrop/);
@@ -92,6 +98,8 @@ test("ships the office as the primary product", async () => {
   assert.match(css, /project-task-list/);
   assert.match(css, /Markdown chat messages/);
   assert.match(css, /\.chat-markdown h1/);
+  assert.match(css, /agent-wander/);
+  assert.match(css, /agent-pool-settings/);
   assert.match(bridge, /isSeparateProject/);
   assert.match(bridge, /isolatedProjectOnly/);
   assert.match(bridge, /--sandbox", "workspace-write/);
@@ -112,6 +120,11 @@ test("ships the office as the primary product", async () => {
   assert.match(bridge, /confirmTaskExecution/);
   assert.match(bridge, /detectCodexBinary/);
   assert.match(bridge, /persistHistory/);
+  assert.match(bridge, /AGENT_PROFILES/);
+  assert.match(bridge, /DEFAULT_AGENT_COUNT = 10/);
+  assert.match(bridge, /createIsolatedWorktree/);
+  assert.match(bridge, /\/task\/integrate/);
+  assert.match(bridge, /\/settings\/agents/);
   assert.doesNotMatch(bridge, /Access-Control-Allow-Origin", "\*"/);
   assert.doesNotMatch(page + layout + office + game, /InvaderGame|codex-preview|_sites-preview/);
 });

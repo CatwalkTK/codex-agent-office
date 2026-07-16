@@ -11,6 +11,7 @@ const WORKSPACE_CONFIG = process.env.CODEX_OFFICE_CONFIG || path.join(CODEX_HOME
 const HISTORY_FILE = process.env.CODEX_OFFICE_HISTORY || path.join(CODEX_HOME, "office", "history.json");
 const SYSTEM_ROOT = await fsp.realpath(process.cwd()).catch(() => path.resolve(process.cwd()));
 const ATTACHMENT_ROOT = path.join(CODEX_HOME, "office", "attachments");
+const WORKTREE_ROOT = path.join(CODEX_HOME, "office", "worktrees");
 const MAX_ATTACHMENT_FILES = 5;
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const MAX_ATTACHMENT_TOTAL = 25 * 1024 * 1024;
@@ -19,6 +20,36 @@ const SESSION_IDLE_MS = 3 * 60 * 1000;
 const MAX_PAIRING_ATTEMPTS = 5;
 const DEFAULT_ALLOWED_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000", "https://codex-agent-office.dattsu.chatgpt.site"];
 const allowedOrigins = new Set([...DEFAULT_ALLOWED_ORIGINS, ...(process.env.CODEX_OFFICE_ALLOWED_ORIGINS || "").split(",").map((value) => value.trim()).filter(Boolean)]);
+const AGENT_MIN = 5;
+const AGENT_MAX = 20;
+const DEFAULT_AGENT_COUNT = 10;
+const AGENT_PROFILES = [
+  { id: "codex", name: "Codex", role: "統括・オーケストレーター" },
+  { id: "scout", name: "Scout", role: "検索・調査" },
+  { id: "mika", name: "Mika", role: "編集・実装" },
+  { id: "reviewer", name: "Reviewer", role: "コードレビュー" },
+  { id: "sora", name: "Sora", role: "テスト・品質保証" },
+  { id: "architect", name: "Architect", role: "設計・分解" },
+  { id: "analyst", name: "Analyst", role: "分析・要件整理" },
+  { id: "builder", name: "Builder", role: "並列実装" },
+  { id: "auditor", name: "Auditor", role: "監査・検証" },
+  { id: "ops", name: "Ops", role: "実行・運用" },
+  { id: "researcher", name: "Researcher", role: "深掘り調査" },
+  { id: "designer", name: "Designer", role: "UI・体験設計" },
+  { id: "writer", name: "Writer", role: "文書・仕様" },
+  { id: "tester2", name: "Tester II", role: "並列テスト" },
+  { id: "reviewer2", name: "Reviewer II", role: "追加レビュー" },
+  { id: "security", name: "Security", role: "セキュリティ" },
+  { id: "data", name: "Data", role: "データ処理" },
+  { id: "release", name: "Release", role: "リリース管理" },
+  { id: "support", name: "Support", role: "調整・支援" },
+  { id: "runner", name: "Runner", role: "補助実行" },
+];
+
+function clampAgentCount(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(AGENT_MIN, Math.min(AGENT_MAX, Math.round(number))) : DEFAULT_AGENT_COUNT;
+}
 
 async function isExecutable(candidate) {
   if (!candidate) return false;
@@ -76,6 +107,7 @@ async function resolveSeparateProject(candidate) {
 let savedConfig = {};
 try { savedConfig = JSON.parse(await fsp.readFile(WORKSPACE_CONFIG, "utf8")); } catch {}
 await fsp.chmod(WORKSPACE_CONFIG, 0o600).catch(() => {});
+let maxAgents = clampAgentCount(savedConfig.maxAgents);
 const configuredProjects = process.env.CODEX_OFFICE_WORKSPACE ? [process.env.CODEX_OFFICE_WORKSPACE] : [...(Array.isArray(savedConfig.projects) ? savedConfig.projects : []), savedConfig.workspace].filter(Boolean);
 const initialProjects = [];
 for (const candidate of configuredProjects) {
@@ -87,13 +119,15 @@ let persistedTasks = [];
 try {
   const history = JSON.parse(await fsp.readFile(HISTORY_FILE, "utf8"));
   if (Array.isArray(history.tasks)) persistedTasks = history.tasks.slice(-100).map((task) => {
-    if (task?.state !== "working" && task?.state !== "starting") return task;
+    if (task?.state !== "working" && task?.state !== "starting" && task?.state !== "queued") return task;
     const interruptedAt = new Date().toISOString();
     return { ...task, state: "error", progress: 100, currentTool: null, completedAt: interruptedAt, updatedAt: interruptedAt, chat: [...(task.chat || []), { id: `restart-${Date.now()}-${Math.random().toString(16).slice(2)}`, time: interruptedAt, from: "system", text: "Bridgeが停止したため、このタスクは中断されました。" }], events: [...(task.events || []), { id: `restart-event-${Date.now()}-${Math.random().toString(16).slice(2)}`, time: interruptedAt, kind: "task", label: "Bridge停止で中断", detail: "", status: "error" }] };
   });
 } catch {}
 const clients = new Map();
 const runningChildren = new Map();
+const queuedPayloads = new Map();
+const dispatchingTasks = new Set();
 let pairingCode = String(crypto.randomInt(0, 1_000_000)).padStart(6, "0");
 let pairingExpiresAt = Date.now() + PAIRING_TTL_MS;
 let pairingAttempts = 0;
@@ -125,7 +159,8 @@ const state = {
   changedFiles: [],
   events: [],
   source: { path: sourcePath, lines: [] },
-  agents: [{ id: "codex", name: "Codex", role: "coding agent", state: "idle", tool: null }],
+  pool: { maxAgents, activeAgents: 0, queuedTasks: 0, worktreesEnabled: true },
+  agents: AGENT_PROFILES.slice(0, maxAgents).map((agent) => ({ ...agent, state: workspace ? "idle" : "offline", tool: null, taskId: null, projectName: null })),
   bridge: { paired: false, codexFound: Boolean(CODEX_BIN && CODEX_VERSION), codexPath: CODEX_BIN || null, codexVersion: CODEX_VERSION || null, historyPersistent: true },
 };
 
@@ -141,8 +176,29 @@ function addEvent(kind, label, detail = "", status = "info") {
   }];
 }
 
-function updateAgent(patch) {
-  state.agents = [{ ...state.agents[0], ...patch }];
+function updateAgent(patch, agentId = "codex") {
+  state.agents = state.agents.map((agent) => agent.id === agentId ? { ...agent, ...patch } : agent);
+}
+
+function syncAgentPool() {
+  const activeTasks = state.tasks.filter((task) => task.agentId && (task.state === "starting" || task.state === "working"));
+  const byAgent = new Map(activeTasks.map((task) => [task.agentId, task]));
+  state.agents = AGENT_PROFILES.slice(0, maxAgents).map((profile) => {
+    const task = byAgent.get(profile.id);
+    return {
+      ...profile,
+      state: task ? task.state : workspace ? "idle" : "offline",
+      tool: task?.currentTool || null,
+      taskId: task?.id || null,
+      projectName: task?.projectName || null,
+    };
+  });
+  state.pool = {
+    maxAgents,
+    activeAgents: activeTasks.length,
+    queuedTasks: state.tasks.filter((task) => task.state === "queued").length,
+    worktreesEnabled: true,
+  };
 }
 
 function toolSummary(name, rawInput) {
@@ -310,15 +366,27 @@ function publicEvent(event) {
   return { ...event, label: redactPublicText(event.label), detail: redactPublicText(event.detail) };
 }
 
+function publicFilePath(value, projectRoot = workspace) {
+  if (!value) return null;
+  const normalized = String(value).replaceAll("\\", "/");
+  if (!path.isAbsolute(value)) return normalized.replace(/^\.\//, "").replace(/^(?:\.\.\/)+/, "");
+  const relative = projectRoot ? path.relative(projectRoot, value).replaceAll("\\", "/") : "";
+  return relative && relative !== ".." && !relative.startsWith("../") ? relative : path.basename(value);
+}
+
 function publicTask(task) {
   const visible = { ...task };
   delete visible.threadId;
+  delete visible.executionWorkspace;
+  delete visible.worktreePath;
   const publicId = projectPublicId(task.workspace);
   return {
     ...visible,
     projectId: publicId,
     workspace: publicId,
     prompt: redactPublicText(task.prompt),
+    currentFile: publicFilePath(task.currentFile, task.workspace),
+    changedFiles: (task.changedFiles || []).map((value) => publicFilePath(value, task.workspace)).filter(Boolean),
     attachmentPaths: (task.attachmentPaths || []).map((value) => path.basename(value)),
     lastAgentMessage: redactPublicText(task.lastAgentMessage),
     events: (task.events || []).map(publicEvent),
@@ -336,8 +404,10 @@ function publicState() {
       return { ...project, id, path: id, taskPrompt: redactPublicText(project.taskPrompt) };
     }),
     tasks: state.tasks.map(publicTask),
+    currentFile: publicFilePath(state.currentFile, workspace),
+    changedFiles: state.changedFiles.map((value) => publicFilePath(value, workspace)).filter(Boolean),
     events: state.events.map(publicEvent),
-    source: { path: state.source.path, lines: state.source.lines.map(redactPublicText) },
+    source: { path: publicFilePath(state.source.path, workspace) || "", lines: state.source.lines.map(redactPublicText) },
     bridge: { ...state.bridge, codexPath: null },
   };
 }
@@ -385,17 +455,17 @@ function syncActiveTaskView() {
   const task = latestTaskFor(workspace);
   if (!task) {
     state.session = null; state.taskState = workspace ? "idle" : "idle"; state.currentTool = null; state.currentFile = null; state.lastAgentMessage = ""; state.taskPrompt = ""; state.startedAt = null; state.completedAt = null; state.changedFiles = []; state.events = [];
-    updateAgent({ state: workspace ? "idle" : "offline", tool: null });
   } else {
     state.session = task.threadId || task.id; state.taskState = task.state; state.currentTool = task.currentTool; state.currentFile = task.currentFile; state.lastAgentMessage = task.lastAgentMessage; state.taskPrompt = task.prompt; state.startedAt = task.startedAt; state.completedAt = task.completedAt; state.changedFiles = task.changedFiles; state.events = task.events;
-    updateAgent({ state: task.state, tool: task.currentTool });
   }
   syncProjectSummaries();
+  syncAgentPool();
 }
 
 function updateParallelTask(task) {
   task.updatedAt = new Date().toISOString();
   if (task.workspace === workspace) syncActiveTaskView(); else syncProjectSummaries();
+  syncAgentPool();
   scheduleHistoryPersist();
   broadcast();
 }
@@ -413,10 +483,10 @@ function consumeTaskRecord(record, task) {
     else if (item.type === "command_execution") { task.currentTool = null; taskEvent(task, "tool", "コマンド完了", item.command || item.aggregated_output || "", item.status === "failed" ? "error" : "success"); }
     else if (item.type === "file_change") {
       const files = (item.changes || []).map((change) => change.path).filter(Boolean); task.changedFiles = [...new Set([...task.changedFiles, ...files])].slice(-50); task.currentFile = files[0] || task.currentFile;
-      if (files[0] && task.workspace === workspace) void refreshSource(files[0]); taskEvent(task, "file", "ファイル変更", files.join(", "), "success");
+      if (files[0] && task.workspace === workspace && !task.isolated) void refreshSource(files[0]); taskEvent(task, "file", "ファイル変更", files.join(", "), "success");
     } else taskEvent(task, "tool", `${item.type || "item"} 完了`, item.server || item.query || "", "success");
   } else if (type === "turn.completed") {
-    task.state = "complete"; task.progress = 100; task.completedAt = new Date().toISOString(); task.currentTool = null; task.tokenUsage = record.usage || null; taskEvent(task, "task", "タスク完了", task.lastAgentMessage, "success");
+    task.turnCompleted = true; task.progress = 98; task.currentTool = null; task.tokenUsage = record.usage || null; taskEvent(task, "task", "Codex処理完了", task.lastAgentMessage, "success");
   } else if (type === "turn.failed" || type === "error") {
     const errorMessage = record.error?.message || record.message || "タスクを完了できませんでした";
     task.state = "error"; task.progress = 100; task.completedAt = new Date().toISOString(); task.currentTool = null; taskChat(task, "system", errorMessage); taskEvent(task, "task", "タスク失敗", errorMessage, "error");
@@ -424,38 +494,161 @@ function consumeTaskRecord(record, task) {
   updateParallelTask(task);
 }
 
-function runTask(prompt, attachmentPaths = [], targetWorkspace = workspace, uploadId = null) {
-  if (!targetWorkspace) throw new Error("先にOfficeシステムとは別のプロジェクトフォルダーを選択してください");
-  if (!CODEX_BIN || !CODEX_VERSION) throw new Error("Codexを検出できません。ChatGPTアプリまたはCodex CLIをインストールしてください");
-  if (!isSeparateProject(targetWorkspace)) throw new Error("保護対象のOfficeシステムではタスクを実行できません");
-  if ([...runningChildren.values()].some((entry) => entry.task.workspace === targetWorkspace)) throw new Error("このプロジェクトでは別のタスクが実行中です。別プロジェクトは同時実行できます");
-  const projectName = path.basename(targetWorkspace);
-  const submittedText = `${safeText(prompt, 1000)}${attachmentPaths.length ? `\n📎 ${attachmentPaths.map((file) => path.basename(file)).join(", ")}` : ""}`;
-  const task = { id: `task-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`, projectId: targetWorkspace, projectName, workspace: targetWorkspace, prompt: safeText(prompt, 1000), attachmentPaths: attachmentPaths.map((file) => path.basename(file)), state: "starting", progress: 5, currentTool: null, currentFile: null, lastAgentMessage: "", startedAt: new Date().toISOString(), completedAt: null, updatedAt: new Date().toISOString(), changedFiles: [], events: [], chat: [], threadId: null, tokenUsage: null };
-  taskChat(task, "you", submittedText);
-  taskChat(task, "system", `${projectName}でタスクを受け付けました。別タスクへ切り替えても処理は継続します。`);
-  taskEvent(task, "task", "Codexを起動", task.prompt, "running");
-  if (attachmentPaths.length) taskEvent(task, "attachment", "添付ファイル受領", `${attachmentPaths.length} files`, "success");
-  const runningHistory = state.tasks.filter((item) => item.state === "working" || item.state === "starting");
-  const completedHistory = state.tasks.filter((item) => item.state !== "working" && item.state !== "starting").slice(-24);
-  state.tasks = [...completedHistory, ...runningHistory, task]; syncProjectSummaries(); if (task.workspace === workspace) syncActiveTaskView(); scheduleHistoryPersist(); broadcast();
+function freeAgentProfile() {
+  const occupied = new Set(state.tasks.filter((task) => task.state === "starting" || task.state === "working" || dispatchingTasks.has(task.id)).map((task) => task.agentId).filter(Boolean));
+  return AGENT_PROFILES.slice(0, maxAgents).find((agent) => !occupied.has(agent.id)) || null;
+}
+
+async function createIsolatedWorktree(task) {
+  const repository = await capture("git", ["-C", task.workspace, "rev-parse", "--show-toplevel"]);
+  if (repository.code !== 0) return null;
+  const repositoryRoot = await fsp.realpath(repository.output.trim()).catch(() => "");
+  if (repositoryRoot !== task.workspace) return null;
+  const head = await capture("git", ["-C", task.workspace, "rev-parse", "--verify", "HEAD"]);
+  if (head.code !== 0) return null;
+  const shortId = task.id.replace(/[^a-zA-Z0-9-]/g, "").slice(-20);
+  const branch = `codex/office-${shortId}`;
+  const parent = path.join(WORKTREE_ROOT, projectPublicId(task.workspace));
+  const directory = path.join(parent, shortId);
+  await fsp.mkdir(parent, { recursive: true, mode: 0o700 });
+  await fsp.rm(directory, { recursive: true, force: true }).catch(() => {});
+  const created = await capture("git", ["-C", task.workspace, "worktree", "add", "-b", branch, directory, "HEAD"], 30_000);
+  if (created.code !== 0) return null;
+  return { directory: await fsp.realpath(directory), branch };
+}
+
+async function dispatchTask(task) {
+  if (task.state !== "queued" || runningChildren.size + dispatchingTasks.size > maxAgents) return false;
+  const agent = freeAgentProfile();
+  if (!agent) return false;
+  task.agentId = agent.id;
+  task.agentName = agent.name;
+  const payload = queuedPayloads.get(task.id) || { attachmentPaths: [], uploadId: null };
+  const projectBusy = [...runningChildren.values()].some((entry) => entry.task.workspace === task.workspace);
+  let executionWorkspace = task.workspace;
+  if (projectBusy) {
+    const worktree = await createIsolatedWorktree(task);
+    if (!worktree) {
+      task.agentId = null; task.agentName = null;
+      taskEvent(task, "queue", "安全な順番待ち", "同一プロジェクトはGit worktreeを作成できるまで直列実行します", "info");
+      return false;
+    }
+    executionWorkspace = worktree.directory;
+    task.isolated = true;
+    task.branch = worktree.branch;
+    task.worktreePath = worktree.directory;
+    task.integrationPending = false;
+    taskChat(task, "system", `${agent.name}がGit worktreeで隔離実行します。完了後に統合操作が必要です。`);
+  }
+
+  task.executionWorkspace = executionWorkspace;
+  task.state = "starting";
+  task.progress = 5;
+  task.startedAt = new Date().toISOString();
+  task.updatedAt = task.startedAt;
+  taskEvent(task, "agent", `${agent.name}を配置`, task.isolated ? `${task.projectName} · worktree` : task.projectName, "running");
+  syncAgentPool(); updateParallelTask(task);
+
+  const attachmentPaths = payload.attachmentPaths || [];
   const attachmentNote = attachmentPaths.length ? `\n\n次の添付ファイルがCodex Officeの保護された一時領域に保存されています。内容を確認してタスクに利用してください。\n${attachmentPaths.map((file) => `- ${file}`).join("\n")}` : "";
-  const args = ["exec", "--json", "--color", "never", "--sandbox", "workspace-write", "--skip-git-repo-check", "-C", targetWorkspace, `${prompt}${attachmentNote}`];
-  const child = spawn(CODEX_BIN, args, { cwd: targetWorkspace, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+  const args = ["exec", "--json", "--color", "never", "--sandbox", "workspace-write", "--skip-git-repo-check", "-C", executionWorkspace, `${task.prompt}${attachmentNote}`];
+  const child = spawn(CODEX_BIN, args, { cwd: executionWorkspace, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
   runningChildren.set(task.id, { child, task });
+  queuedPayloads.delete(task.id);
   let stdoutBuffer = "";
   child.stdout.on("data", (chunk) => {
     stdoutBuffer += chunk.toString(); const lines = stdoutBuffer.split("\n"); stdoutBuffer = lines.pop() || "";
     for (const line of lines) { try { consumeTaskRecord(JSON.parse(line), task); } catch {} }
   });
   child.stderr.on("data", (chunk) => { const text = chunk.toString(); taskEvent(task, "stderr", text.includes(" WARN ") ? "Codex警告" : "Codex stderr", text, text.includes(" WARN ") ? "warning" : "error"); updateParallelTask(task); });
-  child.on("error", (error) => { task.state = "error"; task.progress = 100; task.completedAt = new Date().toISOString(); taskChat(task, "system", error.message); taskEvent(task, "task", "Codex起動失敗", error.message, "error"); runningChildren.delete(task.id); void cleanupUpload(uploadId); updateParallelTask(task); });
+  child.on("error", (error) => {
+    task.state = "error"; task.progress = 100; task.completedAt = new Date().toISOString(); taskChat(task, "system", error.message); taskEvent(task, "task", "Codex起動失敗", error.message, "error"); runningChildren.delete(task.id); void cleanupUpload(payload.uploadId); syncAgentPool(); updateParallelTask(task); void pumpQueue();
+  });
   child.on("close", (code) => {
     runningChildren.delete(task.id);
-    void cleanupUpload(uploadId);
-    if (task.state !== "complete" && task.state !== "error") { task.state = code === 0 ? "complete" : "error"; task.progress = 100; task.completedAt = new Date().toISOString(); task.currentTool = null; if (code !== 0) taskChat(task, "system", `Codexが終了しました（exit ${code}）`); taskEvent(task, "task", code === 0 ? "プロセス完了" : "Codex終了", `exit ${code}`, code === 0 ? "success" : "error"); }
-    updateParallelTask(task);
+    void cleanupUpload(payload.uploadId);
+    if (task.state !== "error") {
+      task.state = code === 0 ? (task.isolated ? "ready" : "complete") : "error";
+      task.integrationPending = Boolean(code === 0 && task.isolated);
+      task.progress = 100; task.completedAt = new Date().toISOString(); task.currentTool = null;
+      if (task.integrationPending) taskChat(task, "system", `${task.agentName}の隔離作業が完了しました。タスク一覧の「統合」から本体へ反映できます。`);
+      else if (code !== 0) taskChat(task, "system", `Codexが終了しました（exit ${code}）`);
+      taskEvent(task, "task", task.integrationPending ? "統合待ち" : code === 0 ? "プロセス完了" : "Codex終了", task.branch || `exit ${code}`, task.integrationPending ? "warning" : code === 0 ? "success" : "error");
+    }
+    syncAgentPool(); updateParallelTask(task); void pumpQueue();
   });
+  return true;
+}
+
+async function pumpQueue() {
+  for (const task of state.tasks.filter((item) => item.state === "queued")) {
+    if (runningChildren.size + dispatchingTasks.size >= maxAgents) break;
+    if (dispatchingTasks.has(task.id)) continue;
+    dispatchingTasks.add(task.id);
+    try { await dispatchTask(task); }
+    finally { dispatchingTasks.delete(task.id); }
+  }
+  syncAgentPool();
+  broadcast();
+}
+
+async function runTask(prompt, attachmentPaths = [], targetWorkspace = workspace, uploadId = null) {
+  if (!targetWorkspace) throw new Error("先にOfficeシステムとは別のプロジェクトフォルダーを選択してください");
+  if (!CODEX_BIN || !CODEX_VERSION) throw new Error("Codexを検出できません。ChatGPTアプリまたはCodex CLIをインストールしてください");
+  if (!isSeparateProject(targetWorkspace)) throw new Error("保護対象のOfficeシステムではタスクを実行できません");
+  const projectName = path.basename(targetWorkspace);
+  const submittedText = `${safeText(prompt, 1000)}${attachmentPaths.length ? `\n📎 ${attachmentPaths.map((file) => path.basename(file)).join(", ")}` : ""}`;
+  const task = { id: `task-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`, projectId: targetWorkspace, projectName, workspace: targetWorkspace, prompt: safeText(prompt, 1000), attachmentPaths: attachmentPaths.map((file) => path.basename(file)), state: "queued", progress: 0, currentTool: null, currentFile: null, lastAgentMessage: "", queuedAt: new Date().toISOString(), startedAt: null, completedAt: null, updatedAt: new Date().toISOString(), changedFiles: [], events: [], chat: [], threadId: null, tokenUsage: null, agentId: null, agentName: null, isolated: false, branch: null, integrationPending: false };
+  taskChat(task, "you", submittedText);
+  taskChat(task, "system", `${projectName}でタスクを受け付けました。空いているエージェントへ自動割り当てします。`);
+  taskEvent(task, "queue", "タスクを受付", task.prompt, "info");
+  if (attachmentPaths.length) taskEvent(task, "attachment", "添付ファイル受領", `${attachmentPaths.length} files`, "success");
+  const activeHistory = state.tasks.filter((item) => item.state === "working" || item.state === "starting" || item.state === "queued");
+  const completedHistory = state.tasks.filter((item) => item.state !== "working" && item.state !== "starting" && item.state !== "queued").slice(-24);
+  state.tasks = [...completedHistory, ...activeHistory, task];
+  queuedPayloads.set(task.id, { attachmentPaths, uploadId });
+  const upload = pendingUploads.get(String(uploadId || "")); if (upload) upload.retained = true;
+  syncAgentPool(); syncProjectSummaries(); if (task.workspace === workspace) syncActiveTaskView(); scheduleHistoryPersist(); broadcast();
+  await pumpQueue();
+  return task;
+}
+
+async function removeTaskWorktree(task) {
+  if (!task?.worktreePath || !task?.workspace) return;
+  await capture("git", ["-C", task.workspace, "worktree", "remove", "--force", task.worktreePath], 30_000);
+  if (task.branch) await capture("git", ["-C", task.workspace, "branch", "-D", task.branch], 30_000);
+  await fsp.rm(task.worktreePath, { recursive: true, force: true }).catch(() => {});
+}
+
+async function integrateTask(taskId) {
+  const task = state.tasks.find((item) => item.id === taskId);
+  if (!task || task.state !== "ready" || !task.integrationPending || !task.worktreePath || !task.branch) throw new RequestError("統合待ちのタスクが見つかりません", 404);
+  if ([...runningChildren.values()].some((entry) => entry.task.workspace === task.workspace)) throw new RequestError("このプロジェクトで実行中のタスクがあります。完了後に統合してください", 409);
+  const mainStatus = await capture("git", ["-C", task.workspace, "status", "--porcelain"]);
+  if (mainStatus.code !== 0) throw new Error("本体プロジェクトのGit状態を確認できません");
+  if (mainStatus.output.trim()) throw new RequestError("本体プロジェクトに未コミット変更があります。先に保存またはコミットしてください", 409);
+  const approved = await confirmLocalAction("Codex Office 変更統合", [`プロジェクト: ${task.projectName}`, `担当: ${task.agentName || "Codex"}`, `ブランチ: ${task.branch}`, "隔離された作業内容を本体ブランチへマージします"], "変更を統合");
+  if (!approved) throw new RequestError("ローカル確認で統合が拒否されました", 403);
+
+  const worktreeStatus = await capture("git", ["-C", task.worktreePath, "status", "--porcelain"]);
+  if (worktreeStatus.code !== 0) throw new Error("隔離作業のGit状態を確認できません");
+  if (worktreeStatus.output.trim()) {
+    const staged = await capture("git", ["-C", task.worktreePath, "add", "-A"], 30_000);
+    if (staged.code !== 0) throw new Error("隔離作業の変更をステージできません");
+    const committed = await capture("git", ["-c", "user.name=Codex Office", "-c", "user.email=codex-office@local", "-C", task.worktreePath, "commit", "-m", `Codex Office: ${task.agentName || "agent"} task ${task.id}`], 30_000);
+    if (committed.code !== 0) throw new Error("隔離作業をコミットできません");
+  }
+  const merge = await capture("git", ["-c", "user.name=Codex Office", "-c", "user.email=codex-office@local", "-C", task.workspace, "merge", "--no-ff", "--no-edit", task.branch], 60_000);
+  if (merge.code !== 0) {
+    await capture("git", ["-C", task.workspace, "merge", "--abort"], 10_000);
+    taskEvent(task, "integration", "統合失敗", merge.output, "error"); updateParallelTask(task);
+    throw new RequestError("自動統合で競合しました。隔離ブランチは保持されています", 409);
+  }
+  await removeTaskWorktree(task);
+  task.state = "complete"; task.integrationPending = false; task.integratedAt = new Date().toISOString(); task.updatedAt = task.integratedAt;
+  taskChat(task, "system", `${task.agentName || "エージェント"}の隔離作業を本体プロジェクトへ統合しました。`);
+  taskEvent(task, "integration", "本体へ統合", task.branch, "success");
+  task.worktreePath = null; task.branch = null; updateParallelTask(task); void refreshSource();
   return task;
 }
 
@@ -613,12 +806,16 @@ async function defaultSourceFor(root) {
   return "";
 }
 
+async function persistWorkspaceConfig() {
+  await fsp.mkdir(path.dirname(WORKSPACE_CONFIG), { recursive: true, mode: 0o700 });
+  await fsp.writeFile(WORKSPACE_CONFIG, `${JSON.stringify({ projects: projectPaths, activeWorkspace: workspace, maxAgents }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  await fsp.chmod(WORKSPACE_CONFIG, 0o600).catch(() => {});
+}
+
 async function switchWorkspace(nextWorkspace) {
   workspace = await resolveSeparateProject(nextWorkspace);
   if (!projectPaths.includes(workspace)) projectPaths.push(workspace);
-  await fsp.mkdir(CODEX_HOME, { recursive: true, mode: 0o700 });
-  await fsp.writeFile(WORKSPACE_CONFIG, `${JSON.stringify({ projects: projectPaths, activeWorkspace: workspace }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-  await fsp.chmod(WORKSPACE_CONFIG, 0o600).catch(() => {});
+  await persistWorkspaceConfig();
   state.workspace = workspace;
   sessionFile = null;
   sessionOffset = 0;
@@ -770,6 +967,17 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ paired: false })); return;
   }
   if (url.pathname === "/codex/status" && req.method === "GET") { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(await codexLoginSummary())); return; }
+  if (url.pathname === "/settings/agents" && req.method === "POST") {
+    try {
+      const data = await readBody(req); const requested = Number(data.maxAgents);
+      if (!Number.isInteger(requested) || requested < AGENT_MIN || requested > AGENT_MAX) throw new RequestError(`エージェント数は${AGENT_MIN}〜${AGENT_MAX}人で指定してください`, 400);
+      const approved = await confirmLocalAction("Codex Office エージェント数変更", [`現在: ${maxAgents}人`, `変更後: ${requested}人`, "同時実行数が増えるとCodexの利用量とPC負荷も増えます"], "人数を変更");
+      if (!approved) throw new RequestError("ローカル確認で人数変更が拒否されました", 403);
+      maxAgents = requested; await persistWorkspaceConfig(); syncAgentPool(); await pumpQueue();
+      res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ pool: state.pool, snapshot: publicState() }));
+    } catch (error) { sendError(res, error, "エージェント数を変更できませんでした"); }
+    return;
+  }
   if (url.pathname === "/history" && req.method === "DELETE") {
     try {
       const approved = await confirmLocalAction("Codex Office 履歴削除", ["保存済みのタスクとチャット履歴をすべて削除します", "この操作は元に戻せません"], "履歴を削除");
@@ -830,8 +1038,17 @@ const server = http.createServer(async (req, res) => {
       if (prompt.length > 12_000) throw new RequestError("prompt is too long", 413);
       const approved = await confirmTaskExecution(prompt, targetWorkspace, attachmentPaths.length);
       if (!approved) { await cleanupUpload(uploadId); res.writeHead(403, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "ローカル確認でタスクが拒否されました" })); return; }
-      const task = runTask(prompt, attachmentPaths, targetWorkspace, uploadId); res.writeHead(202, { "Content-Type": "application/json" }); res.end(JSON.stringify({ accepted: true, taskId: task.id, projectId: projectPublicId(targetWorkspace), attachments: attachmentPaths.map((file) => path.basename(file)) }));
+      const task = await runTask(prompt, attachmentPaths, targetWorkspace, uploadId); res.writeHead(202, { "Content-Type": "application/json" }); res.end(JSON.stringify({ accepted: true, taskId: task.id, projectId: projectPublicId(targetWorkspace), attachments: attachmentPaths.map((file) => path.basename(file)) }));
     } catch (error) { await cleanupUpload(uploadId); sendError(res, error, "タスクを開始できませんでした"); }
+    return;
+  }
+  if (url.pathname === "/task/integrate" && req.method === "POST") {
+    try {
+      const data = await readBody(req);
+      if (typeof data.taskId !== "string" || !data.taskId) throw new RequestError("taskId is required", 400);
+      const task = await integrateTask(data.taskId);
+      res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ integrated: true, task: publicTask(task) }));
+    } catch (error) { sendError(res, error, "隔離作業を統合できませんでした"); }
     return;
   }
   res.writeHead(404); res.end("Not found");
@@ -858,7 +1075,7 @@ setInterval(() => {
 }, 30_000).unref();
 setInterval(() => {
   const cutoff = Date.now() - 10 * 60 * 1000;
-  for (const [uploadId, upload] of pendingUploads) if (upload.createdAt < cutoff) void cleanupUpload(uploadId);
+  for (const [uploadId, upload] of pendingUploads) if (!upload.retained && upload.createdAt < cutoff) void cleanupUpload(uploadId);
 }, 60_000).unref();
 
 let shuttingDown = false;
