@@ -40,6 +40,15 @@ const obstacles = [
 ];
 function blocked(x: number, y: number) { return obstacles.some((o) => x > o.x1 && x < o.x2 && y > o.y1 && y < o.y2); }
 
+function taskHandoffRoute(index: number) {
+  const destination = departmentDeskPositions[index];
+  const start = { x: departmentDeskPositions[0].x, y: 29 };
+  if (index <= 3) return { path:`M ${start.x} ${start.y} L ${start.x} 32 L ${destination.x} 32 L ${destination.x} 28`, x:destination.x, y:28 };
+  const lane = destination.x < 50 ? 26 : 74;
+  const endY = index <= 5 ? 53 : 77;
+  return { path:`M ${start.x} ${start.y} L ${start.x} 32 L ${lane} 32 L ${lane} ${endY + 2} L ${destination.x} ${endY + 2} L ${destination.x} ${endY}`, x:destination.x, y:endY };
+}
+
 function RuntimeCharacter({ agent, index }: { agent: AgentState; index: number }) {
   const position = agentPositions[index] || { x: 50 + (index % 3) * 12, y: 45 + Math.floor(index / 3) * 20 };
   const spriteIndex = (index % 5) + 1;
@@ -190,6 +199,7 @@ export function OfficeDashboard() {
   }, [snapshot.tasks, runningTasks.length, displayAgents]);
   const deskLevels = [deskWorkload.codex,deskWorkload.scout,deskWorkload.mika,deskWorkload.reviewer,deskWorkload.sora,...displayAgents.slice(5,10).map((agent)=>agent.state==="working"?3:0)];
   const deskTones = ["gold","blue","green","purple","red","blue","green","purple","red","gold"];
+  const activeHandoffs = displayAgents.slice(1,10).map((agent,index)=>({agent,index:index+1,route:taskHandoffRoute(index+1)})).filter(({agent})=>agent.state==="working"||agent.state==="starting");
 
   const move = useCallback((dx: number, dy: number, facing: Facing) => {
     if (chatOpen) return;
@@ -314,10 +324,17 @@ export function OfficeDashboard() {
       <div className="office-map" ref={mapRef} tabIndex={0} aria-label="オフィス。WASDまたは矢印キーで移動" onPointerDown={() => mapRef.current?.focus()}>
         <div className="windows"><i /><i /><i /><i /></div>
         <div className="office-floor-title">CODEX & CO. · OPEN OFFICE FLOOR</div>
-        {displayAgents.slice(0,10).map((agent,index)=>{const position=departmentDeskPositions[index];return <div className={`department-desk ${index===0?"boss":""} ${agent.state==="working"?"active":""}`} style={{left:`${position.x}%`,top:`${position.y}%`}} key={`desk-${agent.id}`}><span className="room-sign">{position.room}</span><div className="department-monitor"><i /></div><b>{agent.name}</b><small>{agent.state==="working"?agent.projectName||"TASK IN PROGRESS":agent.role}</small><DeskDocuments level={deskLevels[index]||0} label={index===0?"INBOX":"WORK"} tone={deskTones[index]} active={agent.state==="working"} /></div>})}
+        {displayAgents.slice(0,10).map((agent,index)=>{const position=departmentDeskPositions[index];const active=agent.state==="working"||agent.state==="starting";return <div className={`department-desk ${index===0?"boss":""} ${active?"active":""}`} style={{left:`${position.x}%`,top:`${position.y}%`}} key={`desk-${agent.id}`}><span className="room-sign">{position.room}</span><div className="department-monitor"><i /></div><b>{agent.name}</b><small>{active?agent.projectName||"TASK IN PROGRESS":agent.role}</small><DeskDocuments level={deskLevels[index]||0} label={index===0?"INBOX":"WORK"} tone={deskTones[index]} active={active} /></div>})}
+        <svg className="handoff-overlay" viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="Codexからサブエージェントへのタスク割り当て" data-active-handoffs={activeHandoffs.length}>
+          {activeHandoffs.map(({agent,index,route})=><g className="handoff-route-v2" key={`handoff-${agent.id}`} data-agent={agent.id}>
+            <path className="handoff-path" d={route.path} pathLength="100" />
+            <text className="handoff-label" x={route.x} y={route.y+2.8} textAnchor="middle">ASSIGN</text>
+            <g className="handoff-courier"><rect x="-1.5" y="-1.1" width="3" height="2.2" rx=".25"/><path d="M-1 -.45H1M-1 .1H.65M-1 .6H.8"/><animateMotion dur={`${2.3+(index%3)*.35}s`} repeatCount="indefinite" path={route.path}/></g>
+          </g>)}
+        </svg>
         <div className="meeting-zone"><span>PROJECT TABLE</span><div className="meeting-table"><i/><i/><i/><i/><i/><i/></div><b>共有会議・オーケストレーション</b></div>
         {displayAgents.length>10&&<div className="remote-floor">2F ANNEX <b>+{displayAgents.length-10}</b><span>リモート席で稼働</span></div>}
-        <div className="visual-work-legend"><span><i className="legend-paper" />資料量＝実イベント数</span><span><i className="legend-route" />黄色枠＝担当稼働中</span></div>
+        <div className="visual-work-legend"><span><i className="legend-paper" />資料量＝実イベント数</span><span><i className="legend-route" />流れる資料＝サブエージェントへ割当</span></div>
         <div className="office-plant plant-left"><i /><b /></div><div className="office-plant plant-right"><i /><b /></div><div className="server-rack"><i /><i /><i /><b /></div>
         <div className={`auto-door ${doorOpen ? "open" : ""}`}><div className="door-sign">AUTO · ENTRANCE</div><i className="door-left" /><i className="door-right" /><b className="door-sensor" /></div>
         <div className="move-help"><div><span>YOU</span><b>青いラベルがあなたです</b><small>WASD／矢印キー、または右下ボタンで移動</small></div><button onClick={()=>setPlayer({x:50,y:77,facing:"up"})}>入口へ戻る</button></div>

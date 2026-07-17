@@ -61,6 +61,9 @@ test("ships the office as the primary product", async () => {
   assert.match(office, /DeskDocuments/);
   assert.match(office, /departmentDeskPositions/);
   assert.match(office, /meeting-zone/);
+  assert.match(office, /taskHandoffRoute/);
+  assert.match(office, /handoff-overlay/);
+  assert.match(office, /data-active-handoffs/);
   assert.match(office, /Office本体は保護/);
   assert.match(office, /type="file"/);
   assert.match(office, /uploadId/);
@@ -97,7 +100,7 @@ test("ships the office as the primary product", async () => {
   assert.match(css, /@media\(max-width:700px\)/);
   assert.match(css, /\.office-app/);
   assert.match(css, /\.desk-documents/);
-  assert.match(css, /document-handoff/);
+  assert.match(css, /handoff-dash/);
   assert.match(css, /department-desk/);
   assert.match(css, /meeting-table/);
   assert.match(css, /Multi-project orchestration/);
