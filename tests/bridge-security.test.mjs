@@ -236,10 +236,12 @@ else {
   const pairedResponse = await fetch(`${base}/pair`,{method:"POST",headers:{Origin:allowedOrigin,"Content-Type":"application/json"},body:JSON.stringify({code})}); const paired=await pairedResponse.json();
   const headers={Origin:allowedOrigin,Authorization:`Bearer ${paired.token}`,"Content-Type":"application/json"}; const initial=await (await fetch(`${base}/snapshot`,{headers})).json();
   const first=await (await fetch(`${base}/task`,{method:"POST",headers,body:JSON.stringify({workspace:initial.workspace,prompt:"slow primary task"})})).json();
+  const duringFirst=await (await fetch(`${base}/snapshot`,{headers})).json(); const firstActive=duringFirst.tasks.find((task)=>task.id===first.taskId);
+  assert.equal(firstActive.agentName,"Scout"); assert.equal(duringFirst.agents.find((agent)=>agent.id==="codex").state,"working"); assert.match(duringFirst.agents.find((agent)=>agent.id==="scout").state,/^(starting|working)$/); assert.equal(duringFirst.pool.activeAgents,2);
   const second=await (await fetch(`${base}/task`,{method:"POST",headers,body:JSON.stringify({workspace:initial.workspace,prompt:"isolated secondary task"})})).json();
   const ready=await waitFor(async()=>{const value=await (await fetch(`${base}/snapshot`,{headers})).json();const firstTask=value.tasks.find((task)=>task.id===first.taskId);const secondTask=value.tasks.find((task)=>task.id===second.taskId);return firstTask?.state==="complete"&&secondTask?.state==="ready"?{value,secondTask}:null;},100);
-  assert.equal(ready.secondTask.agentName,"Scout"); assert.equal(ready.secondTask.isolated,true); assert.equal(ready.secondTask.integrationPending,true); assert.equal("worktreePath" in ready.secondTask,false);
+  assert.equal(ready.secondTask.agentName,"Mika"); assert.equal(ready.secondTask.isolated,true); assert.equal(ready.secondTask.integrationPending,true); assert.equal("worktreePath" in ready.secondTask,false);
   const integratedResponse=await fetch(`${base}/task/integrate`,{method:"POST",headers,body:JSON.stringify({taskId:second.taskId})}); assert.equal(integratedResponse.status,200);
   assert.equal(await readFile(path.join(project,"isolated.txt"),"utf8"),"created in worktree\n");
-  const finalSnapshot=await (await fetch(`${base}/snapshot`,{headers})).json(); const integratedTask=finalSnapshot.tasks.find((task)=>task.id===second.taskId); assert.equal(integratedTask.state,"complete"); assert.equal(integratedTask.integrationPending,false);
+  const finalSnapshot=await (await fetch(`${base}/snapshot`,{headers})).json(); const integratedTask=finalSnapshot.tasks.find((task)=>task.id===second.taskId); assert.equal(integratedTask.state,"complete"); assert.equal(integratedTask.integrationPending,false); assert.equal(finalSnapshot.pool.activeAgents,0); assert.equal(finalSnapshot.agents.find((agent)=>agent.id==="codex").state,"idle");
 });

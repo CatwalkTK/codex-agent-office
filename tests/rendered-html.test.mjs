@@ -64,6 +64,8 @@ test("ships the office as the primary product", async () => {
   assert.match(office, /taskHandoffRoute/);
   assert.match(office, /handoff-overlay/);
   assert.match(office, /data-active-handoffs/);
+  assert.match(office, /activeTaskByAgent/);
+  assert.match(office, /runningTasks\.length \? cap/);
   assert.match(office, /Office本体は保護/);
   assert.match(office, /type="file"/);
   assert.match(office, /uploadId/);
@@ -128,6 +130,8 @@ test("ships the office as the primary product", async () => {
   assert.match(bridge, /DEFAULT_ALLOWED_ORIGINS/);
   assert.match(bridge, /confirmTaskExecution/);
   assert.match(bridge, /detectCodexBinary/);
+  assert.match(bridge, /AGENT_PROFILES\.slice\(1, maxAgents\)/);
+  assert.match(bridge, /タスク配分・進行管理/);
   assert.match(bridge, /persistHistory/);
   assert.match(bridge, /AGENT_PROFILES/);
   assert.match(bridge, /DEFAULT_AGENT_COUNT = 10/);

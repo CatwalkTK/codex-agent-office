@@ -171,7 +171,7 @@ export function OfficeDashboard() {
   useEffect(() => { if (chatOpen) window.setTimeout(() => inputRef.current?.focus(), 80); }, [chatOpen]);
   const duration = useMemo(() => snapshot.startedAt ? Math.max(0, Math.round(((snapshot.completedAt ? new Date(snapshot.completedAt).getTime() : now) - new Date(snapshot.startedAt).getTime()) / 1000)) : 0, [snapshot.startedAt, snapshot.completedAt, now]);
   const latestEvents = snapshot.events.slice(-12).reverse();
-  const runningTasks = snapshot.tasks.filter((task) => task.state === "working" || task.state === "starting");
+  const runningTasks = useMemo(() => snapshot.tasks.filter((task) => task.state === "working" || task.state === "starting"), [snapshot.tasks]);
   const visibleTasks = [...snapshot.tasks].reverse().slice(0, 10);
   const selectedTask = snapshot.tasks.find((task)=>task.id===selectedTaskId) || [...snapshot.tasks].reverse().find((task)=>task.workspace===snapshot.workspace) || null;
   const activeProject = snapshot.projects.find((project)=>project.id===snapshot.workspace) || null;
@@ -181,23 +181,17 @@ export function OfficeDashboard() {
     return officeRoster.slice(0,snapshot.pool?.maxAgents||10).map((profile)=>({...profile,state:"offline",tool:null,taskId:null,projectName:null}));
   }, [bridgeConnected, snapshot.agents, snapshot.pool?.maxAgents]);
   const deskWorkload = useMemo(() => {
-    const allEvents = snapshot.tasks.flatMap((task)=>task.events);
-    const records = allEvents.map((event) => `${event.kind} ${event.label} ${event.detail}`.toLowerCase());
-    const count = (pattern: RegExp) => records.filter((record) => pattern.test(record)).length;
     const cap = (value: number) => Math.max(0, Math.min(5, value));
-    const active = new Set(displayAgents.filter((agent) => agent.state === "working").map((agent) => agent.id));
-    const withActiveFloor = (id: string, value: number) => cap(active.has(id) ? Math.max(2, value) : value);
-    const taskActive = runningTasks.length > 0;
-    const changedFileCount = snapshot.tasks.reduce((sum,task)=>sum+task.changedFiles.length,0);
-    return {
-      codex: cap(taskActive ? Math.max(1, Math.ceil(allEvents.length / 3)) : Math.ceil(allEvents.length / 9)),
-      scout: withActiveFloor("scout", count(/web|search|browse|検索|調査/)),
-      mika: withActiveFloor("mika", count(/patch|file|edit|command|変更|更新/) + changedFileCount),
-      reviewer: withActiveFloor("reviewer", count(/review|diff|check|lint|レビュー|確認/)),
-      sora: withActiveFloor("sora", count(/test|build|vitest|playwright|テスト|ビルド/)),
-    };
-  }, [snapshot.tasks, runningTasks.length, displayAgents]);
-  const deskLevels = [deskWorkload.codex,deskWorkload.scout,deskWorkload.mika,deskWorkload.reviewer,deskWorkload.sora,...displayAgents.slice(5,10).map((agent)=>agent.state==="working"?3:0)];
+    const activeTaskByAgent = new Map(runningTasks.filter((task)=>task.agentId).map((task)=>[task.agentId as string,task]));
+    return Object.fromEntries(displayAgents.slice(0,10).map((agent)=>{
+      if (agent.id === "codex") return [agent.id, runningTasks.length ? cap(Math.max(1,runningTasks.length)) : 0];
+      const task = activeTaskByAgent.get(agent.id);
+      if (!task) return [agent.id,0];
+      const workUnits = 1 + task.events.filter((event)=>event.kind==="tool"||event.kind==="file"||event.kind==="message").length + task.changedFiles.length;
+      return [agent.id,cap(Math.max(1,Math.ceil(workUnits/4)))];
+    })) as Record<string,number>;
+  }, [runningTasks, displayAgents]);
+  const deskLevels = displayAgents.slice(0,10).map((agent)=>deskWorkload[agent.id]||0);
   const deskTones = ["gold","blue","green","purple","red","blue","green","purple","red","gold"];
   const activeHandoffs = displayAgents.slice(1,10).map((agent,index)=>({agent,index:index+1,route:taskHandoffRoute(index+1)})).filter(({agent})=>agent.state==="working"||agent.state==="starting");
 

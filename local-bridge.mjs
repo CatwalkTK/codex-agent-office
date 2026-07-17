@@ -184,6 +184,16 @@ function syncAgentPool() {
   const activeTasks = state.tasks.filter((task) => task.agentId && (task.state === "starting" || task.state === "working"));
   const byAgent = new Map(activeTasks.map((task) => [task.agentId, task]));
   state.agents = AGENT_PROFILES.slice(0, maxAgents).map((profile) => {
+    if (profile.id === "codex") {
+      const primaryTask = activeTasks[0];
+      return {
+        ...profile,
+        state: primaryTask ? "working" : workspace ? "idle" : "offline",
+        tool: primaryTask ? "タスク配分・進行管理" : null,
+        taskId: primaryTask?.id || null,
+        projectName: activeTasks.length > 1 ? `${activeTasks.length} PROJECTS` : primaryTask?.projectName || null,
+      };
+    }
     const task = byAgent.get(profile.id);
     return {
       ...profile,
@@ -195,7 +205,7 @@ function syncAgentPool() {
   });
   state.pool = {
     maxAgents,
-    activeAgents: activeTasks.length,
+    activeAgents: activeTasks.length ? Math.min(maxAgents, activeTasks.length + 1) : 0,
     queuedTasks: state.tasks.filter((task) => task.state === "queued").length,
     worktreesEnabled: true,
   };
@@ -496,7 +506,7 @@ function consumeTaskRecord(record, task) {
 
 function freeAgentProfile() {
   const occupied = new Set(state.tasks.filter((task) => task.state === "starting" || task.state === "working" || dispatchingTasks.has(task.id)).map((task) => task.agentId).filter(Boolean));
-  return AGENT_PROFILES.slice(0, maxAgents).find((agent) => !occupied.has(agent.id)) || null;
+  return AGENT_PROFILES.slice(1, maxAgents).find((agent) => !occupied.has(agent.id)) || null;
 }
 
 async function createIsolatedWorktree(task) {
@@ -518,7 +528,7 @@ async function createIsolatedWorktree(task) {
 }
 
 async function dispatchTask(task) {
-  if (task.state !== "queued" || runningChildren.size + dispatchingTasks.size > maxAgents) return false;
+  if (task.state !== "queued" || runningChildren.size + dispatchingTasks.size >= Math.max(1, maxAgents - 1)) return false;
   const agent = freeAgentProfile();
   if (!agent) return false;
   task.agentId = agent.id;
@@ -582,7 +592,7 @@ async function dispatchTask(task) {
 
 async function pumpQueue() {
   for (const task of state.tasks.filter((item) => item.state === "queued")) {
-    if (runningChildren.size + dispatchingTasks.size >= maxAgents) break;
+    if (runningChildren.size + dispatchingTasks.size >= Math.max(1, maxAgents - 1)) break;
     if (dispatchingTasks.has(task.id)) continue;
     dispatchingTasks.add(task.id);
     try { await dispatchTask(task); }
